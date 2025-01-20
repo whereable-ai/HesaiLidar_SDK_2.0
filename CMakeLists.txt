@@ -82,7 +82,6 @@ if(${CUDA_FOUND})
 	link_directories($ENV{CUDA_PATH}/lib/x64)
   file(GLOB_RECURSE CURRENT_HEADERS  *.h *.hpp *.cuh)
   file(GLOB CURRENT_SOURCES  *.cpp *.cu)
-  file(GLOB CURRENT_SOURCES  *.cpp *.cu)
   source_group("Include" FILES ${CURRENT_HEADERS}) 
   source_group("Source" FILES ${CURRENT_SOURCES}) 
   CUDA_ADD_EXECUTABLE(sample_gpu ${CURRENT_HEADERS} ${CURRENT_SOURCES} 
