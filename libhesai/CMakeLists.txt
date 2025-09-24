@@ -47,6 +47,22 @@ include_directories(
     ${OPENSSL_INCLUDE_DIR}
 )
 
+# Find libpcap for live capture functionality
+if(UNIX AND NOT APPLE)
+    find_path(PCAP_INCLUDE_DIR pcap/pcap.h)
+    find_library(PCAP_LIBRARY NAMES pcap)
+    if(PCAP_INCLUDE_DIR AND PCAP_LIBRARY)
+        set(PCAP_FOUND TRUE)
+        message(STATUS "Found libpcap: ${PCAP_LIBRARY}")
+        include_directories(${PCAP_INCLUDE_DIR})
+    else()
+        message(WARNING "libpcap not found - live capture functionality will be disabled")
+        set(PCAP_FOUND FALSE)
+    endif()
+else()
+    set(PCAP_FOUND FALSE)
+endif()
+
 # Make each module an 'OBJECT' library, can be refered to by get_link_libraries
 if(WITH_PTCCLIENT)
     add_library(ptcClient_lib 
@@ -81,7 +97,7 @@ if(WITH_CONTAINER)
 endif(WITH_CONTAINER)
 
 if(WITH_LIDARBOARD)
-    add_library(source_lib 
+    add_library(source_lib
         Source/src/source.cc
         Source/src/socket_source.cc
         Source/src/pcap_source.cc
@@ -91,6 +107,13 @@ if(WITH_LIDARBOARD)
         platutils_lib
         container_lib
         ptcClient_lib)
+    
+    # Link libpcap if available
+    if(PCAP_FOUND)
+        target_link_libraries(source_lib ${PCAP_LIBRARY})
+        target_compile_definitions(source_lib PRIVATE HAVE_LIBPCAP)
+    endif()
+    
     set_target_properties(source_lib
         PROPERTIES CXX_STANDARD_REQUIRED TRUE CXX_STANDARD 14)
 endif(WITH_LIDARBOARD)

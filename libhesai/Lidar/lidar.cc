@@ -135,6 +135,12 @@ int Lidar<T_Point>::Init(const DriverParam& param) {
       source_ = new SocketSource(param.input_param.udp_port, param.input_param.multicast_ip_address);
       source_->Open();
     }
+	else if(param.input_param.source_type == 3) {
+	  source_ = new PcapSource(param.input_param.pcap_path, 0);
+	  source_->setMacFilter(param.input_param.mac_address);
+	  source_->setLiveMode(true);
+	  source_->Open();
+	}
     parser_thread_running_ = param.decoder_param.enable_parser_thread;
     udp_thread_running_ = param.decoder_param.enable_udp_thread;
     if (param.decoder_param.socket_buffer_size > 0) {

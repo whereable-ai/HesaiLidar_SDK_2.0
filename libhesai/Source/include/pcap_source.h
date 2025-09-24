@@ -40,6 +40,12 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <queue>
 #include <cstring>
+#ifdef __linux__
+#include <pcap/pcap.h>
+#include <net/ethernet.h>
+#include <netinet/ip.h>
+#include <arpa/inet.h>
+#endif
 #include "source.h"
 namespace hesai
 {
@@ -156,6 +162,7 @@ public:
 private:
     Private* _p;
     std::string pcap_path_;
+    std::string mac_filter_;  // MAC address filter
     Callback udp_callback_;
     Callback tcp_callback_;
     PcapHeader pcap_header_;
@@ -164,12 +171,20 @@ private:
     TCP pcap_tcp_header_;
     std::array<uint8_t, 1500> payload_;
     int packet_interval_;
+    bool is_live_mode_;       // Flag to indicate live capture mode
+#ifdef __linux__
+    pcap_t* pcap_handle_;     // libpcap handle for live capture
+    struct bpf_program filter_program_;  // Compiled BPF filter program
+#endif
+
 public:
     PcapSource(std::string path, int packet_interval);
     PcapSource(const PcapSource&) = delete;
     PcapSource& operator=(const PcapSource&) = delete;
     virtual ~PcapSource();
     void setPcapPath(std::string path);
+    void setMacFilter(const std::string& mac_address);  // Set MAC address filter
+    void setLiveMode(bool live_mode);  // Set live capture mode
 
     Callback callback() const;
     void callback(Callback);
@@ -178,6 +193,8 @@ public:
     size_t fpos() const;
     void fpos(size_t);
     std::string pcap_path() const;
+    std::string macFilter() const;
+    bool isLiveMode() const;
     int next(UdpPacket& udpPacket, uint16_t u16Len,int flags = 0,
                       int timeout = 1000);
     virtual bool Open();
@@ -190,6 +207,12 @@ public:
     int distinationPort();
     void setPacketInterval(int microsecond);
     virtual void SetSocketBufferSize(uint32_t u32BufSize) {};
+
+private:
+    bool checkMacFilter(const uint8_t* ethernet_header);  // Check MAC address filter
+#ifdef __linux__
+    int nextLivePacket(UdpPacket& udpPacket, uint16_t u16Len, int flags, int timeout);  // Live capture next packet
+#endif
 };
 }  // namespace lidar
 }  // namespace hesai

@@ -41,6 +41,7 @@ enum SourceType
   DATA_FROM_LIDAR = 1,
   DATA_FROM_PCAP = 2,
   DATA_FROM_ROS_PACKET = 3,
+  DATA_FROM_PCAP_LIVE = 4
 };
 
 enum PtcMode
@@ -119,6 +120,7 @@ typedef struct InputParam
   std::string multicast_ip_address = "";  
   ///< Address of host
   std::string host_ip_address = "Your host ip"; 
+  std::string mac_address = "";
   ///< port filter
   uint16_t device_udp_src_port = 0;
   uint16_t device_fault_port = 0;

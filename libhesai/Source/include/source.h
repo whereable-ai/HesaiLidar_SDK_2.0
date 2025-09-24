@@ -74,8 +74,14 @@ class Source {
   virtual bool IsOpened() = 0;
   virtual int Send(uint8_t* u8Buf, uint16_t u16Len, int flags = 0) = 0;
   virtual int Receive(UdpPacket& udpPacket, uint16_t u16Len, int flags = 0,
-                      int timeout = 1000) = 0; 
-  virtual void SetSocketBufferSize(uint32_t u32BufSize) = 0;                   
+                      int timeout = 1000) = 0;
+  virtual void SetSocketBufferSize(uint32_t u32BufSize) = 0;
+  
+  // Optional MAC address filtering interface (default implementation does nothing)
+  virtual void setMacFilter(const std::string& mac_address) {}
+  
+  // Optional live mode interface (default implementation does nothing)
+  virtual void setLiveMode(bool live_mode) {}
 };
 }  // namespace lidar
 }  // namespace hesai

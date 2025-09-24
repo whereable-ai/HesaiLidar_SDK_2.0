@@ -31,6 +31,8 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include <sstream>
+#include <iomanip>
 
 using namespace hesai::lidar;
 
@@ -128,9 +130,14 @@ public:
 PcapSource::PcapSource(std::string path, int packet_interval)
     : _p(new Private)
     , pcap_udp_header_{0, 0, 0, 0}
+    , is_live_mode_(false)
+#ifdef __linux__
+    , pcap_handle_(nullptr)
+#endif
 {
     pcap_path_ = path;
     packet_interval_ = packet_interval;
+    mac_filter_ = "";  // Default: no MAC filtering
 }
 
 PcapSource::~PcapSource() {
@@ -163,27 +170,73 @@ void PcapSource::fpos(size_t new_fpos)
     _p->fpos(new_fpos);
 }
 
-bool PcapSource::Open() {
+void PcapSource::setMacFilter(const std::string& mac_address) {
+    mac_filter_ = mac_address;
+}
 
+void PcapSource::setLiveMode(bool live_mode) {
+    is_live_mode_ = live_mode;
+}
+
+std::string PcapSource::macFilter() const {
+    return mac_filter_;
+}
+
+bool PcapSource::isLiveMode() const {
+    return is_live_mode_;
+}
+
+bool PcapSource::Open() {
     try
     {
         PcapSource::Close();
-        _p->open(pcap_path_);
-        if (!_p->is_open()) {
-            throw std::runtime_error(std::string("Fail to open .pcap file: \"") + (pcap_path_)+"\"");
+        
+        if (is_live_mode_) {
+#ifdef __linux__
+            // Live capture mode using libpcap
+            char errbuf[PCAP_ERRBUF_SIZE];
+            
+            // Open live capture on specified interface
+            pcap_handle_ = pcap_open_live(pcap_path_.c_str(), 65536, 1, 1000, errbuf);
+            if (pcap_handle_ == nullptr) {
+                throw std::runtime_error(std::string("Failed to open live capture on interface: ") + pcap_path_ + " - " + errbuf);
+            }
+            
+            // Set up MAC address filter if specified
+            if (!mac_filter_.empty()) {
+                std::string filter_str = "ether src " + mac_filter_;
+                if (pcap_compile(pcap_handle_, &filter_program_, filter_str.c_str(), 0, PCAP_NETMASK_UNKNOWN) == -1) {
+                    LogError("Failed to compile MAC filter: %s", pcap_geterr(pcap_handle_));
+                } else {
+                    if (pcap_setfilter(pcap_handle_, &filter_program_) == -1) {
+                        LogError("Failed to set MAC filter: %s", pcap_geterr(pcap_handle_));
+                    }
+                }
+            }
+            
+            LogInfo("Opened live capture on interface: %s", pcap_path_.c_str());
+            return true;
+#else
+            throw std::runtime_error("Live capture mode is only supported on Linux");
+#endif
+        } else {
+            // File-based pcap mode
+            _p->open(pcap_path_);
+            if (!_p->is_open()) {
+                throw std::runtime_error(std::string("Fail to open .pcap file: \"") + (pcap_path_)+"\"");
+            }
+            _p->read(pcap_header_);
+            if (pcap_header_.magic_number != pcap_magic_number) {
+                throw std::runtime_error(std::string("Not a valid .pcap file: \"") + (pcap_path_)+"\"");
+            }
+            return true;
         }
-        _p->read(pcap_header_);
-        if (pcap_header_.magic_number != pcap_magic_number) {
-            throw std::runtime_error(std::string("Not a valid .pcap file: \"") + (pcap_path_)+"\"");
-        }
-        return true;
     }
     catch (const std::exception& e)
     {
         LogError("%s", e.what());
         return false;
     }
-
 }
 
 std::string PcapSource::pcap_path() const {
@@ -191,7 +244,15 @@ std::string PcapSource::pcap_path() const {
 }
 
 int PcapSource::next(UdpPacket& udpPacket, uint16_t u16Len, int flags,
-                      int timeout) {                 
+                      int timeout) {
+    if (is_live_mode_) {
+#ifdef __linux__
+        return nextLivePacket(udpPacket, u16Len, flags, timeout);
+#else
+        return -1;  // Live mode not supported on non-Linux systems
+#endif
+    }
+    
     if(_p->eof()) {
         is_pcap_end = true;
         return -1;
@@ -315,12 +376,29 @@ int PcapSource::distinationPort() {
 }
 
 void PcapSource::Close() {
-    _p->close();
+    if (is_live_mode_) {
+#ifdef __linux__
+        if (pcap_handle_) {
+            pcap_close(pcap_handle_);
+            pcap_handle_ = nullptr;
+        }
+#endif
+    } else {
+        _p->close();
+    }
 }
 
 
 bool PcapSource::IsOpened() {
-  return _p->is_open();
+    if (is_live_mode_) {
+#ifdef __linux__
+        return pcap_handle_ != nullptr;
+#else
+        return false;
+#endif
+    } else {
+        return _p->is_open();
+    }
 }
 
 int PcapSource::Receive(UdpPacket& udpPacket, uint16_t u16Len, int flags,
@@ -339,3 +417,199 @@ void PcapSource::setPcapPath(std::string path) {
 void PcapSource::setPacketInterval(int microsecond) {
     packet_interval_ = microsecond;
 }
+
+bool PcapSource::checkMacFilter(const uint8_t* ethernet_header) {
+    // If no MAC filter is set, accept all packets
+    if (mac_filter_.empty()) {
+        return true;
+    }
+    
+    // Extract source MAC address from Ethernet header
+    const Ethernet* eth = reinterpret_cast<const Ethernet*>(ethernet_header);
+    
+    // Convert MAC filter string to bytes for comparison
+    std::stringstream ss(mac_filter_);
+    std::string byte_str;
+    uint8_t filter_mac[6];
+    int i = 0;
+    
+    while (std::getline(ss, byte_str, ':') && i < 6) {
+        filter_mac[i] = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+        i++;
+    }
+    
+    // Compare source MAC address
+    return (memcmp(eth->source_MAC_address, filter_mac, 6) == 0);
+}
+
+#ifdef __linux__
+int PcapSource::nextLivePacket(UdpPacket& udpPacket, uint16_t u16Len, int flags, int timeout) {
+    struct pcap_pkthdr* header;
+    const u_char* packet_data;
+    
+    int result = pcap_next_ex(pcap_handle_, &header, &packet_data);
+    
+    if (result == 1) {
+        // Packet captured successfully
+        if (header->caplen <= 1500 && header->caplen > sizeof(Ethernet)) {
+            // Apply MAC address filter if specified
+            if (!checkMacFilter(packet_data)) {
+                return 1;  // Skip this packet, try next one
+            }
+            
+            // Copy packet data to payload
+            memcpy(payload_.data(), packet_data, header->caplen);
+            
+            // Initialize UdpPacket fields for compatibility with SocketSource
+            udpPacket.packet_len = 0;
+            udpPacket.is_timeout = false;
+            udpPacket.recv_timestamp = header->ts.tv_sec * 1000000 + header->ts.tv_usec;
+            udpPacket.ip = 0;
+            udpPacket.port = 0;
+            
+            switch (((Ethernet*)payload_.data())->ether_type) {
+            case 0x0008: // IPv4
+                {
+                    const PcapIPHeader* ip_hdr = (const PcapIPHeader*)payload_.data();
+                    // Extract source IP address for compatibility
+                    udpPacket.ip = ip_hdr->ip.srce_addr;
+                    
+                    switch (ip_hdr->ip.protocol) {
+                    case 17: // UDP
+                        {
+                            pcap_udp_header_ = *(const UDP*)(payload_.data() + sizeof(PcapIPHeader));
+                            if (header->caplen < sizeof(PcapUDPHeader)) return 1;
+                            
+                            // Set source port for compatibility
+                            udpPacket.port = pcap_udp_header_.source_port;
+                            
+                            int payload_size = header->caplen - sizeof(PcapUDPHeader);
+                            memcpy(udpPacket.buffer, payload_.data() + sizeof(PcapUDPHeader), payload_size);
+                            udpPacket.packet_len = payload_size;
+                            return payload_size;
+                        }
+                    case 6: // TCP
+                    if (header->caplen < sizeof(PcapTCPHeader)) return 1;
+                    pcap_tcp_header_ = *(const TCP*)(payload_.data() + sizeof(PcapIPHeader));
+                    if (tcp_callback_)
+                        return header->caplen - sizeof(PcapTCPHeader);
+                    else
+                        return 2;
+                    default:
+                        return 2;
+                    }
+                }
+                break;
+                
+            case 0xdd86: // IPv6
+                {
+                    const PcapIPv6Header* ipv6_hdr = (const PcapIPv6Header*)payload_.data();
+                    // For IPv6, we can't easily fit into 32-bit ip field, so leave as 0
+                    
+                    switch (ipv6_hdr->ipv6.next_header) {
+                    case 17: // UDP
+                        {
+                            pcap_udp_header_ = *(const UDP*)(payload_.data() + sizeof(PcapIPv6Header));
+                            if (header->caplen < sizeof(PcapUDPv6Header)) return 1;
+                            
+                            // Set source port for compatibility
+                            udpPacket.port = pcap_udp_header_.source_port;
+                            
+                            int payload_size = header->caplen - sizeof(PcapUDPv6Header);
+                            memcpy(udpPacket.buffer, payload_.data() + sizeof(PcapUDPv6Header), payload_size);
+                            udpPacket.packet_len = payload_size;
+                            return payload_size;
+                        }
+                    case 6: // TCP
+                    if (header->caplen < sizeof(PcapTCPv6Header)) return 1;
+                    pcap_tcp_header_ = *(const TCP*)(payload_.data() + sizeof(PcapIPv6Header));
+                    if (tcp_callback_)
+                        return header->caplen - sizeof(PcapTCPv6Header);
+                    else
+                        return 2;
+                    default:
+                        return 2;
+                    }
+                }
+                break;
+                
+            case 0x0081: // VLAN tag
+                switch (*((uint16_t*)(payload_.data() + sizeof(Ethernet) + 2))) {
+                case 0x0008: // IPv4
+                    switch (*((uint8_t*)(payload_.data() + sizeof(Ethernet) + 13))) {
+                    case 17: // UDP
+                        {
+                            pcap_udp_header_ = *(const UDP*)(payload_.data() + sizeof(PcapIPHeader));
+                            if (header->caplen < sizeof(PcapUDPHeader) + 4) return 1;
+                            
+                            // Set source port for compatibility
+                            udpPacket.port = pcap_udp_header_.source_port;
+                            
+                            int payload_size = header->caplen - sizeof(PcapUDPHeader) - 4;
+                            memcpy(udpPacket.buffer, payload_.data() + sizeof(PcapUDPHeader) + 4, payload_size);
+                            udpPacket.packet_len = payload_size;
+                            return payload_size;
+                        }
+                    case 6: // TCP
+                        if (header->caplen < sizeof(PcapTCPHeader) + 4) return 1;
+                        pcap_tcp_header_ = *(const TCP*)(payload_.data() + sizeof(PcapIPHeader));
+                        if (tcp_callback_)
+                            return header->caplen - sizeof(PcapTCPHeader) - 4;
+                        else
+                            return 2;
+                    default:
+                        return 2;
+                    }
+                    break;
+                case 0xdd86: // IPv6
+                    switch (*((uint8_t*)(payload_.data() + sizeof(Ethernet) + 13))) {
+                    case 17: // UDP
+                        {
+                            if (header->caplen < sizeof(PcapUDPv6Header) + 4) return 1;
+                            pcap_udp_header_ = *(const UDP*)(payload_.data() + sizeof(PcapIPv6Header));
+                            
+                            // Set source port for compatibility
+                            udpPacket.port = pcap_udp_header_.source_port;
+                            
+                            int payload_size = header->caplen - sizeof(PcapUDPv6Header) - 4;
+                            memcpy(udpPacket.buffer, payload_.data() + sizeof(PcapUDPv6Header) + 4, payload_size);
+                            udpPacket.packet_len = payload_size;
+                            return payload_size;
+                        }
+                    case 6: // TCP
+                        if (header->caplen < sizeof(PcapTCPv6Header) + 4) return 1;
+                        pcap_tcp_header_ = *(const TCP*)(payload_.data() + sizeof(PcapIPv6Header));
+                        if (tcp_callback_)
+                            return header->caplen - sizeof(PcapTCPv6Header) - 4;
+                        else
+                            return 2;
+                    default:
+                        return 2;
+                    }
+                default:
+                    return 2;
+                }
+                break;
+                
+            default:
+                LogWarning("Cannot parse Ethernet data, type = %x", ((Ethernet*)payload_.data())->ether_type);
+                break;
+            }
+        }
+        return 1;
+    } else if (result == 0) {
+        // Timeout
+        udpPacket.is_timeout = true;
+        return 0;  // Return 0 for timeout like SocketSource
+    } else if (result == -1) {
+        // Error
+        LogError("Error reading packet: %s", pcap_geterr(pcap_handle_));
+        return -1;
+    } else if (result == -2) {
+        // End of file (shouldn't happen in live mode)
+        return -1;
+    }
+    
+    return 1;
+}
+#endif
