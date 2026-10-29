@@ -43,6 +43,7 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall> $<$<COMPILE_LANGUAGE:C>:-Wa
 # ============================================
 # 功能开关
 option(WITH_PTCS_USE "Enable PTC SSL support" ON)
+option(BUILD_SOCKET_TESTS "Build local UDP socket regression tests" OFF)
 # option(BUILD_LOG_LIB_SHARED "Build log library as shared" OFF)
 
 # CUDA 支持
@@ -144,3 +145,10 @@ message(STATUS "  WITH_PTCS_USE:          ${WITH_PTCS_USE}")
 message(STATUS "  FIND_CUDA:              ${FIND_CUDA}")
 message(STATUS "=========================================")
 message(STATUS "")
+
+if(BUILD_SOCKET_TESTS)
+    enable_testing()
+    add_executable(multicast_socket_test test/multicast_socket_test.cc)
+    target_link_libraries(multicast_socket_test PRIVATE hesai_sdk_lib)
+    add_test(NAME multicast_socket_isolation COMMAND multicast_socket_test)
+endif()

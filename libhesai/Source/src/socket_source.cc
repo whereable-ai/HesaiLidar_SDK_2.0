@@ -84,9 +84,23 @@ bool SocketSource::Open() {
 
   if (udp_sock_ == -1) return false;
 
+  in_addr multicast_addr{};
+  if (!multicast_ip_.empty() &&
+      (inet_pton(AF_INET, multicast_ip_.c_str(), &multicast_addr) != 1 ||
+       (ntohl(multicast_addr.s_addr) & 0xf0000000U) != 0xe0000000U)) {
+    LogError("SocketSource::Open(), invalid multicast address: %s", multicast_ip_.c_str());
+    Close();
+    return false;
+  }
+
   memset(&serverAddr, 0, sizeof(serverAddr));
 
   serverAddr.sin_family = AF_INET;
+#ifndef _MSC_VER
+  // A local interface selects membership, not the multicast destination to bind.
+  if (!multicast_ip_.empty()) serverAddr.sin_addr = multicast_addr;
+  else
+#endif
   if (localIp_ == "") serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
   else serverAddr.sin_addr.s_addr = inet_addr(localIp_.c_str());
   serverAddr.sin_port = htons(udp_port_);
@@ -156,8 +170,18 @@ bool SocketSource::Open() {
       sizeof(rcvBufSize));
 
   if(multicast_ip_ != ""){
-    struct ip_mreq mreq;                    
-    mreq.imr_multiaddr.s_addr = inet_addr(multicast_ip_.c_str());
+#ifdef IP_MULTICAST_ALL
+    // Linux otherwise delivers groups joined by other sockets on the same port.
+    const int multicast_all = 0;
+    if (setsockopt(udp_sock_, IPPROTO_IP, IP_MULTICAST_ALL,
+                   reinterpret_cast<const char*>(&multicast_all), sizeof(multicast_all)) < 0) {
+      LogError("SocketSource::Open(), multicast isolation failed, errno: %d", errno);
+      Close();
+      return false;
+    }
+#endif
+    struct ip_mreq mreq{};
+    mreq.imr_multiaddr = multicast_addr;
     if (localIp_ == "")
       mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     else
@@ -165,6 +189,8 @@ bool SocketSource::Open() {
     int ret = setsockopt(udp_sock_, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char *)&mreq, sizeof(mreq));
     if (ret < 0) {
       LogError("Multicast IP error, set correct multicast ip address or keep it empty");
+      Close();
+      return false;
     } 
     else {
       LogInfo("Recive data from multicast ip address %s", multicast_ip_.c_str());
