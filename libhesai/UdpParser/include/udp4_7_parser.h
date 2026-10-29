@@ -29,141 +29,568 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef UDP4_7_PARSER_H_
 #define UDP4_7_PARSER_H_
 
-#define ATX_LASER_NUM (512)
-#define ATX_AZIMUTHS_EVEN    (38452)
-#define ATX_AZIMUTHS_ODD     (7631) 
-#define ATX_ACCEPTANCE_ANGLE (200)
-
 #include "general_parser.h"
-#include "lidar_types.h"
-#include <vector>
-#include <sstream>
-#include <fstream>
-#include <string>
+#include "udp_protocol_v4_7.h"
 namespace hesai
 {
 namespace lidar
 {
-#ifdef _MSC_VER
-#define PACKED
-#pragma pack(push, 1)
-#else
-#define PACKED __attribute__((packed))
-#endif
-
-struct ATXFiretimesHeader {
-  uint8_t delimiter[2];
-  uint8_t version[2];
-  uint8_t reserved1;
-  uint8_t reserved2;
-  uint8_t channel_number;
-  uint16_t angle_division;
-} PACKED;
-
-struct ATXFiretimes {
-  ATXFiretimesHeader header;
-  uint16_t raw_even_firetime_correction_[ATX_LASER_NUM];
-  uint16_t raw_odd_firetime_correction_[ATX_LASER_NUM];
-  double even_firetime_correction_[ATX_LASER_NUM];
-  double odd_firetime_correction_[ATX_LASER_NUM];
-  uint8_t SHA_value[32];
-};
-
-struct ATXCorrectionsHeader {
-  uint8_t delimiter[2];
-  uint8_t version[2];
-  uint8_t reserved1;
-  uint8_t reserved2;
-  uint8_t channel_number;
-  uint16_t angle_division;
-} PACKED;
-
-struct ATXCorrections {
-  ATXCorrectionsHeader header;
-  int16_t raw_azimuths[ATX_LASER_NUM];
-  int16_t raw_azimuths_even[ATX_LASER_NUM];
-  int16_t raw_azimuths_odd[ATX_LASER_NUM];
-  int16_t raw_elevations[ATX_LASER_NUM];
-  int16_t raw_elevations_adjust[ATX_LASER_NUM];
-  float azimuth[ATX_LASER_NUM];
-  float azimuth_even[ATX_LASER_NUM];
-  float azimuth_odd[ATX_LASER_NUM];
-  float elevation[ATX_LASER_NUM];
-  float elevation_adjust[ATX_LASER_NUM];
-  uint8_t SHA_value[32];
-  static constexpr float kBegElevationAdjust = 20.0;
-  static constexpr float kStepElevationAdjust = 2.0;
-  static constexpr uint32_t kLenElevationAdjust = 70;
-  ATXCorrections() : header()
-  {
-    memset(raw_azimuths, 0, sizeof(raw_azimuths));
-    memset(raw_azimuths_even, 0, sizeof(raw_azimuths_even));
-    memset(raw_azimuths_odd, 0, sizeof(raw_azimuths_odd));
-    memset(raw_elevations, 0, sizeof(raw_elevations));
-    memset(raw_elevations_adjust, 0, sizeof(raw_elevations_adjust));
-    memset(azimuth, 0, sizeof(azimuth));
-    memset(azimuth_even, 0, sizeof(azimuth_even));
-    memset(azimuth_odd, 0, sizeof(azimuth_odd));
-    memset(elevation, 0, sizeof(elevation));
-    memset(elevation_adjust, 0, sizeof(elevation_adjust));
-    memset(SHA_value, 0, sizeof(SHA_value));
-  }
-  double GetEndElevationAdjust() {return kBegElevationAdjust + kStepElevationAdjust * double(kLenElevationAdjust - 1); }
-  float ElevationAdjust(int azimuth)
-  {
-    azimuth = (CIRCLE + azimuth) % CIRCLE;
-    double azimuth_angle = (double)azimuth / kAllFineResolutionFloat;
-    if (azimuth_angle < kBegElevationAdjust || azimuth_angle > GetEndElevationAdjust())
-    {
-      return 0;
-    }
-    int index = (azimuth_angle - kBegElevationAdjust) / kStepElevationAdjust;
-    if (index == kLenElevationAdjust - 1){
-      return elevation_adjust[index];
-    }
-    float left_percent = (azimuth_angle - kBegElevationAdjust - index * kStepElevationAdjust) / kStepElevationAdjust;
-    return elevation_adjust[index] * (1 - left_percent) + elevation_adjust[index + 1] * left_percent;
-  }
-};
-
 // class Udp4_7Parser
 // parsers packets and computes points for ATX
-// you can parser the upd or pcap packets using the DocodePacket fuction
-// you can compute xyzi of points using the ComputeXYZI fuction, which uses cpu to compute
 template<typename T_Point>
 class Udp4_7Parser : public GeneralParser<T_Point> {
 public:
   Udp4_7Parser();
-
-  virtual ~Udp4_7Parser();                         
-
-  int16_t GetVecticalAngle(int channel); 
+  virtual ~Udp4_7Parser();     
+  virtual int DecodePacket(LidarDecodedFrame<T_Point> &frame, const UdpPacket& udpPacket, const int packet_index = -1);    
+  virtual int ComputeXYZI(LidarDecodedFrame<T_Point> &frame, uint32_t packet_index);   
+  // get lidar correction file from local file,and pass to udp parser    
+  virtual void LoadCorrectionFile(const std::string& correction_path);
+  virtual int LoadCorrectionString(const char *correction_string, int len);
+  virtual void LoadFiretimesFile(const std::string& firetimes_path);
+  virtual int LoadFiretimesString(const char *firetimes_string, int len);      
+  // get the pointer to the struct of the parsed correction file or firetimes file
+  virtual void* getStruct(const int type);     
+  // get display 
+  virtual int getDisplay(bool **);      
 
   bool IsNeedFrameSplit(uint16_t frame_id);  
-                                
-  virtual void LoadCorrectionFile(std::string correction_path);
-  virtual int LoadCorrectionString(char *correction_string);
-  virtual void LoadFiretimesFile(std::string firetimes_path);
-  virtual int LoadFiretimesString(char *firetimes_string);
-
-  virtual int DecodePacket(LidarDecodedFrame<T_Point> &frame, const UdpPacket& udpPacket); 
-    
-  virtual int ComputeXYZI(LidarDecodedFrame<T_Point> &frame, int packet_index);
-
-  virtual void ParserFaultMessage(UdpPacket& udp_packet, FaultMessageInfo &fault_message_info);
-  ATXCorrections m_ATX_corrections;
-  ATXFiretimes m_ATX_firetimes;
-
+  virtual int ParserFaultMessage(UdpPacket& udp_packet, FaultMessageInfo &fault_message_info);
+  virtual void setFrameRightMemorySpace(LidarDecodedFrame<T_Point> &frame);
 protected:
-  // std::string pcap_file_;
-  // std::string lidar_correction_file_;
-  bool get_correction_file_;
   int last_frameid_ = -1;
+  ATX::ATXCorrections m_ATX_corrections;
+  ATX::ATXFiretimes m_ATX_firetimes;
 };
+
+template<typename T_Point>
+Udp4_7Parser<T_Point>::Udp4_7Parser() {
+  this->default_remake_config.min_azi = 27.0f;
+  this->default_remake_config.max_azi = 153.0f;
+  this->default_remake_config.ring_azi_resolution = 0.1f;
+  this->default_remake_config.max_azi_scan = 1260;   // (max_azi - min_azi) / ring_azi_resolution
+  this->default_remake_config.min_elev = -15.f;
+  this->default_remake_config.max_elev = 10.f;
+  this->default_remake_config.ring_elev_resolution = 0.1f;
+  this->default_remake_config.max_elev_scan = 250;   // (max_elev - min_elev) / ring_elev_resolution
+  LogInfo("init 4_7 parser");
+}
+
+template<typename T_Point>
+Udp4_7Parser<T_Point>::~Udp4_7Parser() { LogInfo("release 4_7 Parser"); }
+
+template <typename T_Point>
+void Udp4_7Parser<T_Point>::setFrameRightMemorySpace(LidarDecodedFrame<T_Point> &frame) {
+  frame.resetMalloc(2500, 256);
+}
+
+template<typename T_Point>
+void Udp4_7Parser<T_Point>::LoadCorrectionFile(const std::string& lidar_correction_file) {
+  try {
+    LogInfo("load correction file from local correction.dat now!");
+    std::ifstream fin(lidar_correction_file, std::ios::binary);
+    if (fin.is_open()) {
+      LogDebug("Open correction file success");
+      int length = 0;
+      fin.seekg(0, std::ios::end);
+      length = static_cast<int>(fin.tellg());
+      fin.seekg(0, std::ios::beg);
+      char *buffer = new char[length + 1];
+      buffer[length] = 0;
+      fin.read(buffer, length);
+      fin.close();
+      int ret = LoadCorrectionString(buffer, length);
+      delete[] buffer;
+      if (ret != 0) {
+        LogError("Parse local Correction file Error");
+      } else {
+        LogInfo("Parse local Correction file Success!!!");
+      }
+    } else {
+      LogError("Open correction file failed");
+      return;
+    }
+  } catch (const std::exception& e) {
+    LogFatal("error loading correction file: %s", e.what());
+  }
+}
+
+template<typename T_Point>
+int Udp4_7Parser<T_Point>::LoadCorrectionString(const char *correction_string, int len) {
+  try {
+    if (len < 32) {
+      throw std::invalid_argument("correction string length is too short");
+    }
+    const char *p = correction_string;
+    ATX::ATXCorrectionsHeader header = *(ATX::ATXCorrectionsHeader *)p;
+    if (0xee == header.delimiter[0] && 0xff == header.delimiter[1]) {
+      switch (header.version[1]) {
+        case 1: {
+          m_ATX_corrections.header = header;
+          p += sizeof(ATX::ATXCorrectionsHeader);
+          m_ATX_corrections.channel_number = *((uint8_t *)p);
+          p++;
+          m_ATX_corrections.angle_division = *((uint16_t *)p);
+          p += sizeof(uint16_t);
+
+          if (m_ATX_corrections.channel_number > ATX::ATX_MAX_CHANNEL_NUM || m_ATX_corrections.angle_division == 0) {
+            throw std::invalid_argument("correction error, channel_number or angle_division out of range");
+          }
+          if (static_cast<size_t>(len) < 9 + sizeof(int16_t) * m_ATX_corrections.channel_number * 2 + 32) {
+            throw std::invalid_argument("correction string length is too short");
+          }
+          memcpy((void *)&m_ATX_corrections.raw_azimuths, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void *)&m_ATX_corrections.raw_elevations, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void*)&m_ATX_corrections.SHA_value, p, 32);
+        } break;
+        case 2: {
+          m_ATX_corrections.header = header;
+          p += sizeof(ATX::ATXCorrectionsHeader);
+          m_ATX_corrections.channel_number = *((uint8_t *)p);
+          p++;
+          m_ATX_corrections.angle_division = *((uint16_t *)p);
+          p += sizeof(uint16_t);
+
+          if (m_ATX_corrections.channel_number > ATX::ATX_MAX_CHANNEL_NUM || m_ATX_corrections.angle_division == 0) {
+            throw std::invalid_argument("correction error, channel_number or angle_division out of range");
+          }
+          if (static_cast<size_t>(len) < 9 + sizeof(int16_t) * m_ATX_corrections.channel_number * 3 + 32) {
+            throw std::invalid_argument("correction string length is too short");
+          }
+          memcpy((void *)&m_ATX_corrections.raw_azimuths_even, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void *)&m_ATX_corrections.raw_azimuths_odd, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void *)&m_ATX_corrections.raw_elevations, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void*)&m_ATX_corrections.SHA_value, p, 32);
+        } break;
+        case 3: {
+          m_ATX_corrections.header = header;
+          p += sizeof(ATX::ATXCorrectionsHeader);
+          m_ATX_corrections.channel_number = *((uint8_t *)p);
+          p++;
+          m_ATX_corrections.angle_division = *((uint16_t *)p);
+          p += sizeof(uint16_t);
+
+          if (m_ATX_corrections.channel_number > ATX::ATX_MAX_CHANNEL_NUM || m_ATX_corrections.angle_division == 0) {
+            throw std::invalid_argument("correction error, channel_number or angle_division out of range");
+          }
+          if (static_cast<size_t>(len) < 9 + sizeof(int16_t) * m_ATX_corrections.channel_number * 3 + sizeof(int16_t) * m_ATX_corrections.floatCorr.kLenElevationAdjust + 32) {
+            throw std::invalid_argument("correction string length is too short");
+          }
+          memcpy((void *)&m_ATX_corrections.raw_azimuths_even, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void *)&m_ATX_corrections.raw_azimuths_odd, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void *)&m_ATX_corrections.raw_elevations, p,
+                 sizeof(int16_t) * m_ATX_corrections.channel_number);
+          p += sizeof(int16_t) * m_ATX_corrections.channel_number;
+          memcpy((void *)&m_ATX_corrections.raw_elevations_adjust, p,
+                 sizeof(int16_t) * m_ATX_corrections.floatCorr.kLenElevationAdjust);
+          p += sizeof(int16_t) * m_ATX_corrections.floatCorr.kLenElevationAdjust;
+          memcpy((void*)&m_ATX_corrections.SHA_value, p, 32);
+        } break;
+        default:
+          throw std::invalid_argument("min_version is wrong!");
+          break;
+      }
+    } else {
+        throw std::invalid_argument("file delimiter is error");
+    }
+  } catch (const std::exception &e) {
+    this->get_correction_file_ = false;
+    LogFatal("load correction error: %s", e.what());
+    return -1;
+  }
+  if(m_ATX_corrections.setToFloatUseAngleDivision()) {
+    this->loadCorrectionSuccess();
+    return 0;
+  }
+  return -1;
+}
+
+template <typename T_Point>
+void Udp4_7Parser<T_Point>::LoadFiretimesFile(const std::string& firetimes_path) {
+  try {
+    int type = 0;
+    size_t len = firetimes_path.length();
+    if (len >= 4) {
+      std::string extension = firetimes_path.substr(len - 4);
+      if (extension == ".bin" || extension == ".dat") {
+        type = 1; //  .bin
+      } else if (extension == ".csv") {
+        type = 2; //  .csv
+      } else {
+        type = 0; //  wrong
+      }   
+    }
+
+    if (type == 0) {
+      throw std::invalid_argument("firetime name is error(not .dat / .bin / .csv)");
+    }
+
+    if (type == 2) {
+      std::ifstream inFile(firetimes_path, std::ios::in);
+      if (inFile.is_open()) {
+        std::string lineStr;
+        //skip first line
+        std::getline(inFile, lineStr); 
+        while (getline(inFile, lineStr)) {
+          std::stringstream ss(lineStr);
+          std::string index, deltTime1, deltTime2;
+          std::getline(ss, index, ',');
+          std::getline(ss, deltTime1, ',');
+          std::getline(ss, deltTime2, ',');
+          int idx = std::stoi(index) - 1;
+          if (idx < 0 || idx >= ATX::ATX_MAX_CHANNEL_NUM) throw std::invalid_argument("index out of range");
+          m_ATX_firetimes.floatCorr.even_firetime_correction_[idx] = std::stof(deltTime1);
+          m_ATX_firetimes.floatCorr.odd_firetime_correction_[idx] = std::stof(deltTime2);
+        }
+        m_ATX_firetimes.header.version[0] = 0;
+        m_ATX_firetimes.header.version[1] = 1;
+        this->loadFiretimeSuccess();
+        inFile.close();
+        return;
+      } else {
+        throw std::invalid_argument("Open firetime file failed");
+      }
+    } 
+    else if (type == 1) {
+      std::ifstream fin(firetimes_path, std::ios::binary);
+      if (fin.is_open()) {
+        LogDebug("Open firetime file success");
+        fin.seekg(0, std::ios::end);
+        int length = static_cast<int>(fin.tellg());
+        fin.seekg(0, std::ios::beg);
+        char *buffer = new char[length + 1];
+        buffer[length] = 0;
+        fin.read(buffer, length);
+        fin.close();
+        int ret = LoadFiretimesString(buffer, length);
+        delete[] buffer;
+        if (ret != 0) {
+          throw std::invalid_argument("Parse local firetime file Error");
+        } else {
+          LogInfo("Parse local firetime file Success!!!");
+        }
+      } else {
+        throw std::invalid_argument("Open firetime file failed");
+      }
+    } else {
+      throw std::invalid_argument("firetime name is error(not .dat / .bin / .csv)");
+    }
+  } catch (const std::exception &e) {
+    this->get_firetime_file_ = false;
+    LogError("load firetimes error: %s", e.what());
+  }
+}
+
+template<typename T_Point>
+int Udp4_7Parser<T_Point>::LoadFiretimesString(const char *firetimes_string, int len) {
+  try {
+    if (len < 32) {
+      throw std::invalid_argument("firetimes string length is too short");
+    }
+    const char *p = firetimes_string;
+    ATX::ATXFiretimesHeader header = *(ATX::ATXFiretimesHeader *)p;
+    if (0xee == header.delimiter[0] && 0xff == header.delimiter[1]) {
+      switch (header.version[1])
+      {
+        case 1: {
+          m_ATX_firetimes.header = header;
+          p += sizeof(ATX::ATXFiretimesHeader);
+          m_ATX_firetimes.channel_number = *((uint8_t *)p);
+          p++;
+          m_ATX_firetimes.angle_division = *((uint16_t *)p);
+          p += sizeof(uint16_t);
+          if (m_ATX_firetimes.channel_number > ATX::ATX_MAX_CHANNEL_NUM || m_ATX_firetimes.angle_division == 0) {
+            throw std::invalid_argument("correction error, channel_number or angle_division out of range");
+          }
+          if (static_cast<size_t>(len) < 9 + sizeof(uint16_t) * m_ATX_firetimes.channel_number * 2 + 32) {
+            throw std::invalid_argument("firetimes string length is too short");
+          }
+          memcpy((void *)&m_ATX_firetimes.raw_even_firetime_correction_, p,
+                 sizeof(uint16_t) * m_ATX_firetimes.channel_number);
+          p += sizeof(uint16_t) * m_ATX_firetimes.channel_number;       
+          memcpy((void *)&m_ATX_firetimes.raw_odd_firetime_correction_, p,
+                 sizeof(uint16_t) * m_ATX_firetimes.channel_number);       
+          p += sizeof(uint16_t) * m_ATX_firetimes.channel_number;
+          memcpy((void*)&m_ATX_firetimes.SHA_value, p, 32);          
+        } break;
+        default:
+          throw std::invalid_argument("min_version is wrong!");
+          break;
+      }
+    } else {
+        throw std::invalid_argument("firetimes file delimiter is error");
+    }
+  } catch (const std::exception &e) {
+    this->get_firetime_file_ = false;
+    LogError("load firetimes error: %s", e.what());
+    return -1;
+  }
+  if (m_ATX_firetimes.setToFloatUseAngleDivision()) {
+    this->loadFiretimeSuccess();
+    return 0;
+  }
+  return -1;
+}
+
+template<typename T_Point>
+bool Udp4_7Parser<T_Point>::IsNeedFrameSplit(uint16_t frame_id) {
+  if ( frame_id != this->last_frameid_  && this->last_frameid_ >= 0) {
+      return true;
+  }
+  return false;
+}
+
+template <typename T_Point>
+void* Udp4_7Parser<T_Point>::getStruct(const int type) {
+  if (type == CORRECTION_STRUCT)
+    return (void*)&(m_ATX_corrections);
+  else if (type == FIRETIME_STRUCT)
+    return (void*)&(m_ATX_firetimes);
+  return nullptr;
+}
+
+template <typename T_Point>
+int Udp4_7Parser<T_Point>::getDisplay(bool **display) {
+  *display = m_ATX_corrections.display;
+  return ATX::ATX_MAX_CHANNEL_NUM;
+}
+
+template<typename T_Point>
+int Udp4_7Parser<T_Point>::ComputeXYZI(LidarDecodedFrame<T_Point> &frame, uint32_t packet_index) {
+  if (packet_index >= frame.maxPacketPerFrame || frame.point_cloud_raw_data == nullptr) {
+    LogFatal("packet_index(%d) out of %d. or data ptr is nullptr", packet_index, frame.maxPacketPerFrame);
+    GeneralParser<T_Point>::FrameNumAdd();
+    return -1;
+  }
+  uint8_t* data = frame.point_cloud_raw_data + packet_index * frame.point_cloud_size;
+
+  const HS_LIDAR_HEADER_ST_V7 *pHeader =
+      reinterpret_cast<const HS_LIDAR_HEADER_ST_V7 *>(
+          data + sizeof(HS_LIDAR_PRE_HEADER));
+  
+  const HS_LIDAR_TAIL_ST_V7 *pTail =
+      reinterpret_cast<const HS_LIDAR_TAIL_ST_V7 *>(
+          (const unsigned char *)pHeader + sizeof(HS_LIDAR_HEADER_ST_V7) +
+          (sizeof(HS_LIDAR_BODY_AZIMUTH_ST_V7) +
+           sizeof(HS_LIDAR_BODY_FINE_AZIMUTH_ST_V7) +
+           sizeof(HS_LIDAR_BODY_CHN_NNIT_ST_V7) * pHeader->GetLaserNum()) *
+              pHeader->GetBlockNum() +
+          sizeof(HS_LIDAR_BODY_CRC_ST_V7));
+  uint8_t frameID = pTail->GetFrameID() % 2;
+  int point_index = packet_index * frame.per_points_num;
+  int point_num = 0;
+  auto& packetData = frame.packetData[packet_index];
+  for (int blockid = 0; blockid < frame.block_num; blockid++) {
+    int current_block_echo_count = ((pHeader->GetEchoCount() > 0 && pHeader->GetEchoNum() > 0) ?
+            ((pHeader->GetEchoCount() - 1 + blockid) % pHeader->GetEchoNum() + 1) : 0);
+    if (frame.fParam.echo_mode_filter != 0 && current_block_echo_count != 0 && frame.fParam.echo_mode_filter != current_block_echo_count) {
+      continue;
+    }
+    const HS_LIDAR_BODY_AZIMUTH_ST_V7 *pAzimuth =
+      reinterpret_cast<const HS_LIDAR_BODY_AZIMUTH_ST_V7 *>(
+          (const unsigned char *)pHeader + sizeof(HS_LIDAR_HEADER_ST_V7) +
+          (sizeof(HS_LIDAR_BODY_AZIMUTH_ST_V7) + sizeof(HS_LIDAR_BODY_FINE_AZIMUTH_ST_V7) +
+          sizeof(HS_LIDAR_BODY_CHN_NNIT_ST_V7) * pHeader->GetLaserNum()) * blockid);
+
+    int32_t u32Azimuth = pAzimuth->GetAzimuth();
+    const HS_LIDAR_BODY_CHN_NNIT_ST_V7 * pChnUnit = reinterpret_cast<const HS_LIDAR_BODY_CHN_NNIT_ST_V7 *>(
+        (const unsigned char *)pAzimuth + sizeof(HS_LIDAR_BODY_AZIMUTH_ST_V7) + sizeof(HS_LIDAR_BODY_FINE_AZIMUTH_ST_V7));
+    for (int channel_index = 0; channel_index < frame.laser_num; ++channel_index) {
+      if (m_ATX_corrections.display[channel_index] == false) {
+        pChnUnit++;
+        continue;
+      }
+      float raw_azimuth = 1.f * u32Azimuth / kFineResolutionFloat;
+      float raw_elevation = 0;
+      float distance = static_cast<float>(pChnUnit->GetDistance() * frame.distance_unit);
+      if (this->get_firetime_file_ && frame.fParam.firetimes_flag) {
+        raw_azimuth += ((frameID % 2 == 0) ? m_ATX_firetimes.floatCorr.even_firetime_correction_[channel_index] : 
+                          - m_ATX_firetimes.floatCorr.odd_firetime_correction_[channel_index]) * (abs(static_cast<int16_t>(pTail->GetMotorSpeed())) * 1E-9 / 8);
+      }
+      if (this->get_correction_file_) {
+        if (m_ATX_corrections.floatCorr.min_version == 1) {
+          raw_azimuth += m_ATX_corrections.floatCorr.azimuth[channel_index];
+        }
+        else if (m_ATX_corrections.floatCorr.min_version == 2 || m_ATX_corrections.floatCorr.min_version == 3) {
+          raw_azimuth += ((frameID % 2 == 0) ? m_ATX_corrections.floatCorr.azimuth_even[channel_index] : 
+                            m_ATX_corrections.floatCorr.azimuth_odd[channel_index]);
+        }
+        if(m_ATX_corrections.floatCorr.min_version == 1 || m_ATX_corrections.floatCorr.min_version == 2) {
+          raw_elevation = m_ATX_corrections.floatCorr.elevation[channel_index];
+        } 
+        else if (m_ATX_corrections.floatCorr.min_version == 3) {
+          raw_elevation = m_ATX_corrections.floatCorr.elevation[channel_index] + m_ATX_corrections.floatCorr.ElevationAdjust(raw_azimuth);
+        }
+      }
+      int elevation = floatToInt(raw_elevation * kAllFineResolutionInt);
+      int azimuth = floatToInt(raw_azimuth * kAllFineResolutionInt);
+      this->CircleRevise(azimuth);
+      this->CircleRevise(elevation);
+      if (this->IsChannelFovFilter(azimuth / kAllFineResolutionInt, channel_index, frame.fParam) == 1) {
+        pChnUnit++;
+        continue;
+      }
+      float xyDistance = distance * this->cos_all_angle_[(elevation)];
+      float x = xyDistance * this->sin_all_angle_[(azimuth)];
+      float y = xyDistance * this->cos_all_angle_[(azimuth)];
+      float z = distance * this->sin_all_angle_[(elevation)];
+      this->TransformPoint(x, y, z, frame.fParam.transform);
+
+      int point_index_rerank = point_index + point_num; 
+      int channel_index_remake = channel_index;
+      GeneralParser<T_Point>::DoRemake(azimuth, elevation, channel_index_remake, frame.fParam.remake_config, point_index_rerank); 
+      if(point_index_rerank >= 0) { 
+        auto& ptinfo = frame.points[point_index_rerank]; 
+        set_x(ptinfo, x); 
+        set_y(ptinfo, y); 
+        set_z(ptinfo, z); 
+        set_ring(ptinfo, channel_index); 
+        set_intensity(ptinfo, pChnUnit->GetReflectivity());  
+        set_timestamp(ptinfo, double(packetData.t.sensor_timestamp) / kMicrosecondToSecond);
+        set_confidence(ptinfo, pChnUnit->GetConfidenceLevel());
+        set_azimuth_lazy(ptinfo, [u32Azimuth]() { return static_cast<float>(u32Azimuth) / kFineResolutionFloat; }); 
+        set_azimuthCalib_lazy(ptinfo, [azimuth]() {return static_cast<float>(azimuth) / kAllFineResolutionFloat; }); 
+        set_elevation(ptinfo, m_ATX_corrections.floatCorr.elevation[channel_index]);
+        set_elevationCalib_lazy(ptinfo, [elevation]() { return static_cast<float>(elevation) / kAllFineResolutionFloat; }); 
+        set_distance(ptinfo, distance); 
+
+        point_num++;
+      }
+      pChnUnit++;
+    }
+  }
+  frame.valid_points[packet_index] = point_num;
+  GeneralParser<T_Point>::FrameNumAdd();
+  return 0;
+}
+
+template<typename T_Point>
+int Udp4_7Parser<T_Point>::DecodePacket(LidarDecodedFrame<T_Point> &frame, const UdpPacket& udpPacket, const int packet_index) {
+  uint32_t packet_index_use = (packet_index >= 0 ? packet_index : frame.packet_num);
+  if (udpPacket.buffer[0] != 0xEE || udpPacket.buffer[1] != 0xFF ||
+      udpPacket.buffer[2] != 4 || udpPacket.buffer[3] != 7) {
+    LogDebug("Invalid point cloud");
+    return -1;
+  }
+  frame.scan_complete = false;
+
+  const HS_LIDAR_HEADER_ST_V7 *pHeader =
+      reinterpret_cast<const HS_LIDAR_HEADER_ST_V7 *>(
+          &(udpPacket.buffer[0]) + sizeof(HS_LIDAR_PRE_HEADER));
+  
+  const HS_LIDAR_TAIL_ST_V7 *pTail =
+      reinterpret_cast<const HS_LIDAR_TAIL_ST_V7 *>(
+          (const unsigned char *)pHeader + sizeof(HS_LIDAR_HEADER_ST_V7) +
+          (sizeof(HS_LIDAR_BODY_AZIMUTH_ST_V7) +
+           sizeof(HS_LIDAR_BODY_FINE_AZIMUTH_ST_V7) +
+           sizeof(HS_LIDAR_BODY_CHN_NNIT_ST_V7) * pHeader->GetLaserNum()) *
+              pHeader->GetBlockNum() +
+          sizeof(HS_LIDAR_BODY_CRC_ST_V7));
+  
+  if (frame.frame_init_ == false) {
+    frame.block_num = pHeader->GetBlockNum();
+    frame.laser_num = pHeader->GetLaserNum();
+    frame.per_points_num = pHeader->GetBlockNum() * pHeader->GetLaserNum();
+    frame.distance_unit = pHeader->GetDistUnit();
+    if (frame.per_points_num > frame.maxPointPerPacket) {
+      LogFatal("per_points_num(%u) out of %d", frame.per_points_num, frame.maxPointPerPacket);
+      return -1;
+    }
+    if (frame.laser_num > ATX::ATX_MAX_CHANNEL_NUM) {
+      LogFatal("laser_num(%u) out of %d", frame.laser_num, ATX::ATX_MAX_CHANNEL_NUM);
+      return -1;
+    }
+    frame.frame_init_ = true;
+  }
+  if (pHeader->GetBlockNum() != frame.block_num
+      || pHeader->GetLaserNum() != frame.laser_num
+      || pHeader->GetDistUnit() != frame.distance_unit) {
+    LogFatal("block_num or laser_num or distance_unit is not match");
+    return -1;
+  }
+  // 分帧标记位为该字节的最后一个bit
+  uint8_t frameID = pTail->GetFrameID() % 2;
+  if (IsNeedFrameSplit(frameID)) {
+    frame.scan_complete = true;
+  }
+  this->last_frameid_ = frameID;
+  if (frame.scan_complete)
+    return 0;
+
+  if (pHeader->HasSeqNum()) {
+    const HS_LIDAR_TAIL_SEQ_NUM_ST_V7 *pTailSeqNum =
+        reinterpret_cast<const HS_LIDAR_TAIL_SEQ_NUM_ST_V7 *>(
+            (const unsigned char *)pHeader + sizeof(HS_LIDAR_HEADER_ST_V7) +
+            (sizeof(HS_LIDAR_BODY_AZIMUTH_ST_V7) +
+             sizeof(HS_LIDAR_BODY_FINE_AZIMUTH_ST_V7) +
+             sizeof(HS_LIDAR_BODY_CHN_NNIT_ST_V7) * pHeader->GetLaserNum()) *
+                pHeader->GetBlockNum() +
+            sizeof(HS_LIDAR_BODY_CRC_ST_V7) + sizeof(HS_LIDAR_TAIL_ST_V7));
+    this->CalPktLoss(pTailSeqNum->GetSeqNum(), frame.fParam);
+  }
+  this->CalPktTimeLoss(pTail->GetMicroLidarTimeU64(this->last_utc_time), frame.fParam);
+  // const HS_LIDAR_E2E_HEADER_ST_V7 *pE2EHeader = 
+  //     reinterpret_cast<const HS_LIDAR_E2E_HEADER_ST_V7 *>(
+  //           (const unsigned char *)pHeader + sizeof(HS_LIDAR_HEADER_ST_V7) +
+  //           (sizeof(HS_LIDAR_BODY_AZIMUTH_ST_V7) +
+  //            sizeof(HS_LIDAR_BODY_FINE_AZIMUTH_ST_V7) +
+  //            sizeof(HS_LIDAR_BODY_CHN_NNIT_ST_V7) * pHeader->GetLaserNum()) *
+  //               pHeader->GetBlockNum() +
+  //           sizeof(HS_LIDAR_BODY_CRC_ST_V7) + sizeof(HS_LIDAR_TAIL_ST_V7)
+  //           + (pHeader->HasSeqNum() ? sizeof(HS_LIDAR_TAIL_SEQ_NUM_ST_V7) : 0));
+
+  frame.return_mode = pTail->GetReturnMode();
+
+  if (frame.fParam.use_timestamp_type == 0) {
+    frame.packetData[packet_index_use].t.sensor_timestamp = pTail->GetMicroLidarTimeU64(this->last_utc_time);
+  } else {
+    frame.packetData[packet_index_use].t.sensor_timestamp = udpPacket.recv_timestamp;
+  }   
+  if (frame.frame_start_timestamp == 0) frame.frame_start_timestamp = double(frame.packetData[packet_index_use].t.sensor_timestamp) / kMicrosecondToSecond;
+  frame.frame_end_timestamp = double(frame.packetData[packet_index_use].t.sensor_timestamp) / kMicrosecondToSecond;
+  
+
+  auto packet_size = udpPacket.packet_len;
+  if (this->last_max_packet_num_ != frame.maxPacketPerFrame) {
+    this->last_max_packet_num_ = frame.maxPacketPerFrame;
+    if (frame.point_cloud_raw_data != nullptr) delete[] frame.point_cloud_raw_data;
+    frame.point_cloud_size = packet_size;
+    frame.point_cloud_raw_data = new uint8_t[frame.point_cloud_size * frame.maxPacketPerFrame];
+    memset(frame.point_cloud_raw_data, 0, frame.point_cloud_size * frame.maxPacketPerFrame);
+  }
+  if (frame.point_cloud_size != packet_size) {
+    LogFatal("point cloud size is should be %d, but is %d", frame.point_cloud_size, packet_size);
+    return -1;
+  }
+  memcpy(frame.point_cloud_raw_data + packet_index_use * frame.point_cloud_size, udpPacket.buffer, packet_size);
+  frame.packet_num++;
+  return 0;
+}
+
+template<typename T_Point>
+int Udp4_7Parser<T_Point>::ParserFaultMessage(UdpPacket& udp_packet, FaultMessageInfo &fault_message_info) {
+  FaultMessageVersion4_7 *fault_message_ptr =  
+      reinterpret_cast< FaultMessageVersion4_7*> (&(udp_packet.buffer[0]));
+  fault_message_ptr->ParserFaultMessage(fault_message_info, this->last_utc_time);
+  return 0;
+}
+
+
 }  // namespace lidar
 }  // namespace hesai
-#ifdef _MSC_VER
-#pragma pack(pop)
-#endif
-#include "udp4_7_parser.cc"
+
 #endif // end of UDP4_7_PARSER_H_

@@ -28,6 +28,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef PCPASTREAMER_H_
 #define PCPASTREAMER_H_
 
+#define NOMINMAX
 #include <functional>
 #include <array>
 #include <deque>
@@ -35,7 +36,6 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <thread>
 #include <utility>
 #include <string>
-#include <string_view>
 #include <fstream>
 #include <memory>
 #include <queue>
@@ -84,8 +84,8 @@ struct PcapIPHeader {
         uint8_t	    time_to_live;	/* time to live */
         uint8_t	    protocol;		/* protocol */
         uint16_t    checksum;		/* checksum */
-        uint32_t    srce_addr;      /* source address*/
-        uint32_t    dist_addr;	    /* destination address */
+        uint32_t    src_addr;      /* source address*/
+        uint32_t    dst_addr;	    /* destination address */
     } ip;
     PcapIPHeader(uint8_t protocol, uint16_t pkt_len);
 };
@@ -99,15 +99,15 @@ struct PcapIPv6Header {
         uint16_t    payload_length;
         uint8_t     next_header;    /* protocol */
         uint8_t     hop_limit;
-        uint8_t     srce_addr[16];  /* source address*/
-        uint8_t     dist_addr[16];	/* destination address */
+        uint8_t     src_addr[16];  /* source address*/
+        uint8_t     dst_addr[16];	/* destination address */
     } ipv6;
     PcapIPv6Header(uint8_t protocol, uint16_t pkt_len);
 };
 static_assert(sizeof(PcapIPv6Header::IPv6) == 40, "Size of PcapIPv6Header::IPv6 must be 40");
 struct UDP {
     uint16_t source_port;
-    uint16_t distination_port;
+    uint16_t destination_port;
     uint16_t length;
     uint16_t check_sum;
 };
@@ -124,16 +124,16 @@ struct PcapUDPv6Header : public PcapIPv6Header {
 static_assert(sizeof(PcapUDPv6Header) == 62, "Size of PcapUDPv6Header must be 62");
 struct TCP {
     uint16_t source_port;
-    uint16_t distination_port;
+    uint16_t destination_port;
     uint32_t seq;
     uint32_t ack;
-    uint8_t lenres : 4;
-    uint8_t reserved1 : 4;
-    uint8_t reserved2 : 2;
-    uint8_t flag : 6;
+    uint8_t len_flags;
+    uint8_t flags;
     uint16_t win;
     uint16_t check_sum;
     uint16_t urp;
+    uint32_t getLenres() { return ((len_flags & 0xF0) >> 4) * 4; }
+    uint16_t getFlags() { return (len_flags & 0x0F) << 8 | flags; }
 };
 static_assert(sizeof(TCP) == 20, "Size of TCP must be 20");
 struct PcapTCPHeader : public PcapIPHeader {
@@ -148,38 +148,120 @@ struct PcapTCPv6Header : public PcapIPv6Header {
 static_assert(sizeof(PcapTCPv6Header) == 74, "Size of PcapTCPv6Header must be 74");
 #pragma pack(pop)
 
-class PcapSource : public Source{
+enum ByteOrder {
+    BYTE_ORDER_NATIVE,
+    BYTE_ORDER_SWAPPED
+};
+
+struct TcpCheckStruct {
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t seq;
+    uint32_t ack;
+    bool is_ipv6 = false;
+    uint8_t* src_ipv6;
+    uint8_t* dst_ipv6;
+    uint32_t recv_payload_len;
+    bool isSameIpv6(uint8_t* ipv6_1, uint8_t* ipv6_2) {
+        return memcmp(ipv6_1, ipv6_2, 16) == 0;
+    }
+    bool isResponse(TcpCheckStruct& other) {
+        if (other.is_ipv6) {
+            if (!isSameIpv6(other.src_ipv6, dst_ipv6) 
+                || !isSameIpv6(other.dst_ipv6, src_ipv6)) {
+                return false;
+            }
+        }
+        else {
+            if (other.src_ip != dst_ip || other.dst_ip != src_ip) {
+                return false;
+            }
+        }
+        if (other.src_port != dst_port || other.dst_port != src_port) {
+            return false;
+        }
+        return (seq + 1) == other.ack && ack == other.seq;
+    }
+    bool isNextPacket(TcpCheckStruct& other) {
+        if (other.is_ipv6) {
+            if (!isSameIpv6(other.src_ipv6, src_ipv6) 
+                || !isSameIpv6(other.dst_ipv6, dst_ipv6)) {
+                return false;
+            }
+        }
+        else {
+            if (other.src_ip != src_ip || other.dst_ip != dst_ip) {
+                return false;
+            }
+        }
+        if (other.src_port != src_port || other.dst_port != dst_port) {
+            return false;
+        }
+        return (other.seq == seq + recv_payload_len);
+    }
+};
+
+enum BlockType {
+    SHB = 0x0A0D0D0A,
+    IDB = 0x00000001,
+    SPB = 0x00000003,
+    NRB = 0x00000004,
+    ISB = 0x00000005,
+    EPB = 0x00000006,
+    DPB = 0x00000007
+};
+
+class PcapSource : public Source {
 public:
     using Callback = std::function<int(const uint8_t*, uint32_t)>;
+    using CallbackTcp = std::function<int(const uint8_t*, uint32_t, TcpCheckStruct&)>;
 public:
-    struct Private;
+    class Private;
 private:
     Private* _p;
     std::string pcap_path_;
     Callback udp_callback_;
-    Callback tcp_callback_;
+    CallbackTcp tcp_callback_;
     PcapHeader pcap_header_;
     PcapRecord pcap_record_;
     UDP pcap_udp_header_;
     TCP pcap_tcp_header_;
-    std::array<uint8_t, 1500> payload_;
+    std::array<uint8_t, kBufSize> payload_;
+    std::array<uint8_t, 65536> payload_tcp_;
+    std::vector<uint8_t> packet_data_pcapng;
     int packet_interval_;
+    bool is_loop = false;
+    int begin_pos = 0;
+    ByteOrder byte_order_;
+    uint32_t time_precision_;
+    static const int kDataMaxLength = kBufSize * 100;
+    uint8_t m_receiveBuffer[kDataMaxLength]; 
+    int dataIndex = 0;
+    int dataLength = 0;
+    int network = 1;
+    int last_need_read_len = 0;
+    inline void clearLastNeedRead();
+    bool is_pcapng = false;
 public:
     PcapSource(std::string path, int packet_interval);
     PcapSource(const PcapSource&) = delete;
     PcapSource& operator=(const PcapSource&) = delete;
     virtual ~PcapSource();
     void setPcapPath(std::string path);
+    int parser_ethernet_type(uint8_t *, uint32_t, uint16_t&);
 
     Callback callback() const;
     void callback(Callback);
-    Callback tcp_callback() const;
-    void tcp_callback(Callback);
+    CallbackTcp tcp_callback() const;
+    void tcp_callback(CallbackTcp);
     size_t fpos() const;
     void fpos(size_t);
     std::string pcap_path() const;
-    int next(UdpPacket& udpPacket, uint16_t u16Len,int flags = 0,
-                      int timeout = 1000);
+    int next();
+    int nextPcap();
+    int nextPcapng();
     virtual bool Open();
     virtual void Close();
 
@@ -187,9 +269,13 @@ public:
     virtual int Send(uint8_t* u8Buf, uint16_t u16Len, int flags = 0);
     virtual int Receive(UdpPacket& udpPacket, uint16_t u16Len, int flags = 0,
                       int timeout = 20000);
-    int distinationPort();
+    int destinationPort();
     void setPacketInterval(int microsecond);
-    virtual void SetSocketBufferSize(uint32_t u32BufSize) {};
+    virtual void SetSocketBufferSize(uint32_t u32BufSize) { (void)u32BufSize; };
+    virtual void SetPcapLoop(bool loop) { is_loop = loop; };
+    inline uint16_t convert_endian_16(uint16_t value);
+    inline uint32_t convert_endian_32(uint32_t value);
+    uint64_t getPacketTimestamp(const PcapRecord& record);
 };
 }  // namespace lidar
 }  // namespace hesai

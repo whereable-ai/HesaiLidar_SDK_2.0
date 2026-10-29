@@ -30,26 +30,18 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <vector>
 #include "general_parser.h"
-#include "pcap_saver.h"
 #include "lidar_types.h"
 #include "udp_p40_parser.h"
 #include "udp_p64_parser.h"
 #include "udp1_4_parser.h"
-#include "udp2_4_parser.h"
-#include "udp2_5_parser.h"
-#include "udp2_6_parser.h"
+#include "udp1_8_parser.h"
 #include "udp3_1_parser.h"
 #include "udp3_2_parser.h"
 #include "udp4_3_parser.h"
 #include "udp4_7_parser.h"
 #include "udp6_1_parser.h"
 #include "udp7_2_parser.h"
-#include "udp_p40_parser.h"
-#include "udp_p64_parser.h"
-#define PKT_SIZE_40P (1262)
-#define PKT_SIZE_AC (1256)
-#define PKT_SIZE_64 (1194)
-#define PKT_SIZE_20 (1270)
+#include "udp7_3_parser.h"
 namespace hesai
 {
 namespace lidar
@@ -58,68 +50,523 @@ namespace lidar
 // the UdpParser class is an interface layer.it instantiates a specific udp parser class,
 // which is determined by lidar type.
 // UdpParser mainly parsers udp or pcap packets and computes xyzi of points 
-// you can parser the upd or pcap packets using the DocodePacket fuction
-// you can compute xyzi of points using the ComputeXYZI fuction, which uses cpu to compute
+// you can parser the udp or pcap packets using the DecodePacket function
+// you can compute xyzi of points using the ComputeXYZI function, which uses cpu to compute
 template <typename T_Point>
 class UdpParser {
  public:
-  UdpParser(uint8_t major, uint8_t minor);
-  explicit UdpParser(const std::string &lidar_type);
-  explicit UdpParser(const UdpPacket &packet);
-  UdpParser();
-  virtual ~UdpParser();
-  void CreatGeneralParser(uint8_t major, uint8_t minor);
-  void CreatGeneralParser(const std::string& lidar_type);
-  void CreatGeneralParser(const UdpPacket& packet);
-  GeneralParser<T_Point> *GetGeneralParser();
-  void SetGeneralParser(GeneralParser<T_Point> *Parser);
-  PcapSaver *GetPcapSaver();
+  explicit UdpParser(const std::string &lidar_type) {
+    source_type_ = -1;
+    parser_ = nullptr;
+    first_packet_ = true;
+    printErrorBool = true;
+    lidar_type_decoded_ = "unknow";
+    this->CreatGeneralParser(lidar_type);
+  }
 
-  // get lidar correction file from local file,and pass to udp parser
-  void LoadCorrectionFile(std::string correction_path);  //从本地文件获取
-  int LoadCorrectionString(char *correction_string);  //从角度文件char*数据获取
+  explicit UdpParser(const UdpPacket &packet) {
+    source_type_ = -1;
+    parser_ = nullptr;
+    first_packet_ = true;
+    printErrorBool = true;
+    lidar_type_decoded_ = "unknow";
+    this->CreatGeneralParser(packet);
+  }
 
-  // get lidar firetime correction file from local file,and pass to udp parser
-  void LoadFiretimesFile(std::string firetimes_path);
-  void EnableUpdateMonitorInfo();
-  void DisableUpdateMonitorInfo();
-  uint16_t *GetMonitorInfo1();
-  uint16_t *GetMonitorInfo2();
-  uint16_t *GetMonitorInfo3();
+  UdpParser() {
+    source_type_ = -1;
+    parser_ = nullptr;
+    first_packet_ = true;
+    printErrorBool = true;
+    lidar_type_decoded_ = "unknow";
+  }
 
-  // covert a origin udp packet to decoded packet, the decode function is in UdpParser module
+  virtual ~UdpParser() {
+    if (parser_ != nullptr) {
+      delete parser_;
+      parser_ = nullptr;
+    }
+  }
+
+  // set parser
+  void CreatGeneralParser(const std::string& lidar_type) {
+    if (parser_ != nullptr) {
+      delete parser_;
+      parser_ = nullptr;
+    }
+
+    if (lidar_type == "Pandar64") {
+      parser_ = new UdpP64Parser<T_Point>();
+      lidar_type_decoded_ = "Pandar64";
+    } 
+    else if (lidar_type == "Pandar40" || lidar_type == "Pandar40P") {
+      parser_ = new UdpP40Parser<T_Point>();
+      lidar_type_decoded_ = "Pandar40";
+    } 
+    else if (lidar_type == "Pandar128E3X" || lidar_type == "Pandar128") 
+    {
+      parser_ = new Udp1_4Parser<T_Point>(STR_PANDARN);
+      lidar_type_decoded_ = "Pandar128";
+    } 
+    else if (lidar_type == "OT128") {
+      parser_ = new Udp1_4Parser<T_Point>(STR_OT128);
+      lidar_type_decoded_ = "OT128";
+    }
+    /* JT128 begin */
+    else if(lidar_type == "JT128") {
+      parser_ = new Udp1_4Parser<T_Point>(STR_OTHER);
+      lidar_type_decoded_ = "JT128";
+    }
+    /* JT128 end */
+    else if (lidar_type == "JT16") {
+      parser_ = new Udp1_8Parser<T_Point>();
+      lidar_type_decoded_ = "JT16";
+    } 
+    else if (lidar_type == "PandarQT") {
+      parser_ = new Udp3_1Parser<T_Point>();
+      lidar_type_decoded_ = "PandarQT";
+    } 
+    else if (lidar_type == "PandarQT128" || lidar_type == "QT128C2X") {
+      parser_ = new Udp3_2Parser<T_Point>();
+      lidar_type_decoded_ = "PandarQT128";
+    } 
+    else if (lidar_type == "AT128" || lidar_type == "AT128E2X" || lidar_type == "AT128E3X") {
+      parser_ = new Udp4_3Parser<T_Point>();
+      lidar_type_decoded_ = "AT128";
+    } 
+    else if (lidar_type == "ATX" ) {
+      parser_ = new Udp4_7Parser<T_Point>();
+      lidar_type_decoded_ = "ATX";
+    } 
+    else if (lidar_type == "PandarXT" || lidar_type == "PandarXT16" || lidar_type == "PandarXT-16" || 
+               lidar_type == "PandarXT32" || lidar_type == "PandarXT-32") 
+    {
+      parser_ = new Udp6_1Parser<T_Point>(STR_XTM1);
+      lidar_type_decoded_ = "PandarXT";
+    } 
+    else if (lidar_type == "PandarXTM" || lidar_type == "XT32M2X") {
+      parser_ = new Udp6_1Parser<T_Point>(STR_XTM2);  
+      lidar_type_decoded_ = "PandarXTM";
+    } 
+    else if (lidar_type == "PandarFT120" || lidar_type == "FT120C1X") {
+      parser_ = new Udp7_2Parser<T_Point>();
+      lidar_type_decoded_ = "PandarFT120";
+    }
+    else if (lidar_type == "PandarFT2" || lidar_type == "FTX" || lidar_type == "FT2") {
+      parser_ = new Udp7_3Parser<T_Point>();
+      lidar_type_decoded_ = "PandarFT2";
+    }
+  }
+
+  void CreatGeneralParser(const UdpPacket& packet) {
+    if (parser_ != nullptr) {
+      delete parser_;
+      parser_ = nullptr;
+    }
+    if (PKT_SIZE_40P == packet.packet_len ||
+        PKT_SIZE_40P + 4 == packet.packet_len || PKT_SIZE_AC == packet.packet_len) {
+      // Pandar40
+      parser_ = new UdpP40Parser<T_Point>();  
+      lidar_type_decoded_ = "Pandar40";
+      return;
+    }
+    if (PKT_SIZE_64_B6 == packet.packet_len || PKT_SIZE_64_B6 + 4 == packet.packet_len ||
+        PKT_SIZE_20_B7 == packet.packet_len || PKT_SIZE_20_B7 + 4 == packet.packet_len) {
+      // Pandar64
+      parser_ = new UdpP64Parser<T_Point>();  
+      lidar_type_decoded_ = "Pandar64";
+      return;
+    }
+    auto data = packet.buffer;
+    auto packet_len = packet.packet_len;
+    if (data[0] != 0xEE || data[1] != 0xFF) {
+      if (data[SOMEIP_OFFSET] == 0xEE && data[SOMEIP_OFFSET + 1] == 0xFF) {
+        data += SOMEIP_OFFSET;
+        packet_len -= SOMEIP_OFFSET;
+      } else {
+        LogWarning("Packet with invaild delimiter, len %d, 0x%02x 0x%02x 0x%02x 0x%02x", packet_len, data[0], data[1],  data[2], data[3]);
+        return;
+      }
+    }
+    uint8_t major = data[2];
+    uint8_t minor = data[3];
+
+    switch (major) {
+      case 1:
+      {
+        switch (minor) {
+          case 4: {
+            const HS_LIDAR_HEADER_ME_V4 *pHeader =
+                reinterpret_cast<const HS_LIDAR_HEADER_ME_V4 *>(
+                    data + sizeof(HS_LIDAR_PRE_HEADER));
+            if (pHeader->packetSize() != packet_len) {
+              LogWarning("V1_4 pkt len: %u, due pkt len: %u", packet_len, pHeader->packetSize());
+            break;
+            }
+            uint8_t statusInfoVersion = data[4];
+            /* JT128 begin */
+            if (statusInfoVersion >= 137) {
+              lidar_type_decoded_ = "JT128";
+              parser_ = new Udp1_4Parser<T_Point>(STR_OTHER);
+            } else 
+            /* JT128 end */
+            if (statusInfoVersion > 127) {
+              lidar_type_decoded_ = "OT128";
+              parser_ = new Udp1_4Parser<T_Point>(STR_OT128);
+            } else {
+              lidar_type_decoded_ = "Pandar128";
+              parser_ = new Udp1_4Parser<T_Point>(STR_PANDARN);
+            }
+          } break;
+          case 8:
+            parser_ = new Udp1_8Parser<T_Point>();
+            lidar_type_decoded_ = "JT16";
+            break;
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      case 2: 
+      {
+        switch (minor) {
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      case 3:
+      {
+        switch (minor) {
+          case 1:
+            parser_ = new Udp3_1Parser<T_Point>();  // QT32 QT64
+            lidar_type_decoded_ = "PandarQT";
+            break;
+          case 2:
+            parser_ = new Udp3_2Parser<T_Point>();  // QT128
+            lidar_type_decoded_ = "PandarQT128";
+            break;
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+
+      } break;
+      case 4:
+      {
+        switch (minor) {
+          case 1:
+          case 3:
+            parser_ = new Udp4_3Parser<T_Point>();
+            lidar_type_decoded_ = "AT128";
+            break;
+          case 7:
+            parser_ = new Udp4_7Parser<T_Point>();
+            lidar_type_decoded_ = "ATX";
+            break;
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      case 5:
+      {
+        switch (minor) {
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      case 6:
+      {
+        switch (minor) {
+          case 1: {
+            uint8_t blockNum = data[7];
+            if (blockNum == 8) {
+              lidar_type_decoded_ = "PandarXT";
+              parser_ = new Udp6_1Parser<T_Point>(STR_XTM1);
+            } else if (blockNum == 6) {
+              lidar_type_decoded_ = "PandarXTM";
+              parser_ = new Udp6_1Parser<T_Point>(STR_XTM2);
+            } else {
+              // It doesn't normally go here.
+              lidar_type_decoded_ = "PandarXTM";
+              parser_ = new Udp6_1Parser<T_Point>(STR_XTM2);
+              LogError("XT version unknown, unable to set distance correction coordinates");
+            }
+          } break;
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      case 7:
+      {
+        switch (minor) {
+          case 2:
+            parser_ = new Udp7_2Parser<T_Point>();
+            lidar_type_decoded_ = "PandarFT120";
+            break;
+          case 3: {
+            const HS_LIDAR_HEADER_FT_V3 *pHeader =
+                reinterpret_cast<const HS_LIDAR_HEADER_FT_V3 *>(
+                    data + sizeof(HS_LIDAR_PRE_HEADER));
+            if (pHeader->GetPacketSize() != packet_len) {
+              LogWarning("V7_3 packet size: %d, expected: %d", packet_len, pHeader->GetPacketSize());
+              break;
+            }
+            parser_ = new Udp7_3Parser<T_Point>();
+            lidar_type_decoded_ = "PandarFT2";
+          } break;
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      case 8:
+      {
+        switch (minor) {
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      case 24:
+      {
+        switch (minor) {
+          default:
+            LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+            break;
+        }
+      } break;
+      default:
+        LogError("Unknown lidar type: 0x%02x 0x%02x", data[2], data[3]);
+        break;
+    }
+    return;
+  }
+
+  void SetGeneralParser(GeneralParser<T_Point> *parser) { parser_ = parser; }
+  // get parser
+  GeneralParser<T_Point> *GetGeneralParser() { return parser_; }
+
+  // load correction file, which is necessary for DecodePacket.
+  void LoadCorrectionFile(const std::string& correction_path) {
+    if (parser_ != nullptr) {
+      parser_->LoadCorrectionFile(correction_path);
+    }
+    return;
+  }
+
+  int LoadCorrectionString(const char *correction_string, int len) {
+    if (parser_ != nullptr) {
+      return parser_->LoadCorrectionString(correction_string, len);
+    }
+    return -1;
+  }
+
+  // load firetimes file
+  void LoadFiretimesFile(const std::string& firetimes_path) {
+    if (parser_ != nullptr) {
+      parser_->LoadFiretimesFile(firetimes_path);
+    }
+    return;
+  }
+
+  int LoadFiretimesString(const char *firetimes_string, int len) {
+    if (parser_ != nullptr) {
+      return parser_->LoadFiretimesString(firetimes_string, len);
+    }
+    return -1;
+  }
+
+  // load channel config file
+  int LoadChannelConfigFile(const std::string channel_config_path) {
+    if (parser_ != nullptr) {
+      return parser_->LoadChannelConfigFile(channel_config_path);
+    }
+    return -1;
+  }
+
+  // load dcf config file
+  int LoadDcfConfigFile(const std::string& dcf_path) {
+    if (parser_ != nullptr) {
+      return parser_->LoadDcfConfigFile(dcf_path);
+    }
+    return -1;
+  }
+
+  int LoadDcfConfigString(const char *dcf_string, int len) {
+    if (parser_ != nullptr) {
+      return parser_->LoadDcfConfigString(dcf_string, len);
+    }
+    return -1;
+  }
+
+  int LoadChannelConfigString(char *channel_config_content) {
+    if (parser_ != nullptr) {
+      return parser_->LoadChannelConfigString(channel_config_content);
+    }
+    return -1;
+  }
+
+  // load nonlinear mapping file (for reflectivity mapping)
+  int LoadNonlinearMappingFile(const std::string& mapping_path) {
+    if (parser_ != nullptr) {
+      return parser_->LoadNonlinearMappingFile(mapping_path);
+    }
+    return -1;
+  }
+
+  int LoadNonlinearMappingString(const char *mapping_string, int len) {
+    if (parser_ != nullptr) {
+      return parser_->LoadNonlinearMappingString(mapping_string, len);
+    }
+    return -1;
+  }
+
+  int ExportNonlinearMappingFile(const std::string& mapping_path) {
+    if (parser_ != nullptr) {
+      return parser_->ExportNonlinearMappingFile(mapping_path);
+    }
+    return -1;
+  }
+
+  // get the pointer to the struct of the parsed correction file or firetimes file
+  void *getStruct(const int type) { if (parser_ != nullptr) return parser_->getStruct(type); else return nullptr; }
+  int getDisplay(bool **display) { if (parser_ != nullptr) return parser_->getDisplay(display); else return 0; }
+  // get/set correction/firetimes file loading flag
+  bool isSetCorrectionSucc() { if (parser_ != nullptr) return parser_->isSetCorrectionSucc(); else return false; }
+  bool isSetFiretimeSucc() { if (parser_ != nullptr) return parser_->isSetFiretimeSucc(); else return false; }
+
   // covert a origin udp packet to decoded data, and pass the decoded data to a frame struct to reduce memory copy
-  int DecodePacket(LidarDecodedFrame<T_Point> &frame, const UdpPacket& udpPacket);  
+  int DecodePacket(LidarDecodedFrame<T_Point> &frame, const UdpPacket& udpPacket, const int packet_index = -1) {
+    if (udpPacket.packet_len < 6) {   // sizeof(HS_LIDAR_PRE_HEADER)
+      frame.scan_complete = false;
+      return -1;
+    }
+    if (parser_ == nullptr) {
+      // Udp raw_udp_packet
+      this->CreatGeneralParser(udpPacket);
+      return 0;
+    } else {
+      int res = 0;
+      uint32_t packet_index_use = packet_index >= 0 ? packet_index : frame.packet_num;
+      parser_->setRemakeDefaultConfig(frame);
+      do {
+        if (!parser_->isSetCorrectionSucc()) {
+          if (printErrorBool) {
+            LogWarning("No available angle calibration files, prohibit parsing of point cloud packages");
+            printErrorBool = false;
+          }
+          res = -1;
+          // break;
+        }
+        if (packet_index_use >= frame.maxPacketPerFrame) {
+          LogFatal("packet_index_use(%u) out of %d", packet_index_use, frame.maxPacketPerFrame);
+          res = -1;
+          break;
+        }
+        res = parser_->DecodePacket(frame, udpPacket, packet_index);
+      } while(0);
+      if (res < 0 && packet_index >= 0 && static_cast<uint32_t>(packet_index) < frame.maxPacketPerFrame) {
+        frame.valid_points[packet_index] = 0;
+      }
+      //data from pcap and play rate synchronize with the host time
+      if (source_type_ == DATA_FROM_PCAP && frame.fParam.pcap_time_synchronization == true && res == 0) {
+        uint64_t sensor_timestamp = frame.frame_end_timestamp * kMicrosecondToSecond;
+        if(first_packet_ == true) {
+          last_host_timestamp_ = std::chrono::steady_clock::now();
+          last_sensor_timestamp_ = timePoint(std::chrono::microseconds(sensor_timestamp));
+          first_packet_ = false;
+        } else {
+          if (frame.scan_complete) {
+            auto sensor_time = timePoint(std::chrono::microseconds(sensor_timestamp));
+            auto duration0 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - last_host_timestamp_);
+            auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(sensor_time - last_sensor_timestamp_);
+            auto sleepTime = (duration1 / play_rate_ - duration0);
+            last_sensor_timestamp_ = sensor_time;
+            if (sleepTime > std::chrono::milliseconds(0)) {
+              std::this_thread::sleep_for(sleepTime);
+            }
+            last_host_timestamp_ = std::chrono::steady_clock::now();
+          }
+        }
+      }
+      return res;
+    }
+  }
 
-  // compute xyzi of points from decoded packet
-  // param packet is the decoded packet; xyzi of points after computed is puted in frame    
-  int ComputeXYZI(LidarDecodedFrame<T_Point> &frame, int packet_index);
+  // xyzi of points after computed is puted in frame  
+  int ComputeXYZI(LidarDecodedFrame<T_Point> &frame, uint32_t packet_index) {
+    if (parser_ == nullptr) {
+      return -1;
+    } else {
+      return parser_->ComputeXYZI(frame, packet_index);
+    }
+  }
 
   // parse the detailed content of the fault message message
-  int ParserFaultMessage(UdpPacket& udp_packet, FaultMessageInfo &fault_message_info);
+  int ParserFaultMessage(UdpPacket& udp_packet, FaultMessageInfo &fault_message_info) {
+    if (parser_ == nullptr) {
+      return -1;
+    } else {
+      return parser_->ParserFaultMessage(udp_packet, fault_message_info);
+    }
+    return 0;
+  }
 
-  int GetGeneralParser(GeneralParser<T_Point> **parser);
-  int SetTransformPara(float x, float y, float z, float roll, float pitch, float yaw);
-  GeneralParser<T_Point>* GetParser() {return parser_;}
+  // get/clear the number of parsed packets
+  uint32_t GetComputePacketNum() { if (parser_ != nullptr) return parser_->GetComputePacketNum(); else return 0; }
+  void SetComputePacketNumToZero() { if (parser_ != nullptr) parser_->SetComputePacketNumToZero(); }
+  //
+  void setFrameRightMemorySpace(LidarDecodedFrame<T_Point> &frame) { if (parser_ != nullptr) parser_->setFrameRightMemorySpace(frame); }
+
+  // set frame azimuth
+  void SetFrameAzimuth(float frame_start_azimuth) {
+    if (parser_ != nullptr) {
+      parser_->SetFrameAzimuth(frame_start_azimuth);
+    } else {
+      LogWarning("parser is nullptr");
+    }
+    return;
+  }
+
+  // set the parsing type
+  void SetPcapPlay(int source_type) {
+    source_type_ = source_type;
+  }
+
+  // fet the basic lidar model
   std::string GetLidarType() {return lidar_type_decoded_;}
-  void SetPcapPlay(bool pcap_time_synchronization, int source_type);
-  void SetFrameAzimuth(float frame_start_azimuth);
-  uint32_t getComputePacketNum() { if (parser_ != nullptr) return parser_->getComputePacketNum(); else return 0; }
-  void setComputePacketNumToZero() { if (parser_ != nullptr) parser_->setComputePacketNumToZero(); }
+
+  void SetPlayRate(float play_rate) {
+    if (play_rate <= 0.0f) {
+      LogWarning("play_rate must be greater than 0.0, set play_rate to 1.0");
+      play_rate_ = 1.0f;
+    }
+    else if (play_rate > 100.0f) {
+      LogWarning("play_rate must be less than 100.0, set play_rate to 100.0");
+      play_rate_ = 100.0f;
+    }
+    else play_rate_ = play_rate;
+  }
+
+  int FrameProcess(LidarDecodedFrame<T_Point> &frame) { if (parser_ != nullptr) return parser_->FrameProcess(frame); else return -1; }
+
+  
  private:
+  using timePoint = std::chrono::time_point<std::chrono::steady_clock>;
   GeneralParser<T_Point> *parser_;
-  PcapSaver *pcap_saver_;
   std::string lidar_type_decoded_;
-  bool fisrt_packet_;
-  uint64_t last_host_timestamp_;
-  uint64_t last_sensor_timestamp_;
-  uint8_t packet_count_;
-  bool pcap_time_synchronization_;
+  bool first_packet_;
+  timePoint last_host_timestamp_;
+  timePoint last_sensor_timestamp_;
   int source_type_;
+  bool printErrorBool;
+  float play_rate_ = 1.0;
 };
 }  // namespace lidar
 }  // namespace hesai
-
-#include "udp_parser.cc"
 
 #endif  // UDP_PARSER_H_

@@ -29,6 +29,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 #include <string>
 #include "logger.h"  
+#include "hs_com.h"
 namespace hesai
 {
 namespace lidar
@@ -41,12 +42,14 @@ enum SourceType
   DATA_FROM_LIDAR = 1,
   DATA_FROM_PCAP = 2,
   DATA_FROM_ROS_PACKET = 3,
+  DATA_FROM_SERIAL = 4,
+  DATA_FROM_LIDAR_TCP = 5,
 };
 
 enum PtcMode
 {
   tcp = 0, 
-  tcp_ssl
+  tcp_ssl = 1
 };
 
 enum UseTimestampType
@@ -55,40 +58,20 @@ enum UseTimestampType
   sdk_recv_timestamp = 1,
 };
 
-///< The Point transform parameter
-typedef struct TransformParam  
-{
-  ///< unit, m
-  float x = 0.0f; 
-  ///< unit, m     
-  float y = 0.0f;
-  ///< unit, m      
-  float z = 0.0f;  
-  ///< unit, radian    
-  float roll = 0.0f;  
-  ///< unit, radian 
-  float pitch = 0.0f;  
-  ///< unit, radian
-  float yaw = 0.0f;    
-} TransformParam;
-
 ///< LiDAR decoder parameter
 typedef struct DecoderParam  
 {
-  // float max_distance = 200.0f;                                       ///< Max distance of point cloud range
-  // float min_distance = 0.2f;                                         ///< Minimum distance of point cloud range
-  // float start_angle = 0.0f;                                          ///< Start angle of point cloud
-  // float end_angle = 360.0f;                                          ///< End angle of point cloud
-  
   ///< Used to transform points
   TransformParam transform_param;    
   int thread_num = 1;
   bool enable_udp_thread = true;
   bool enable_parser_thread = true;
   bool pcap_play_synchronization = true;
+  float play_rate_ = 1.0;
+  bool pcap_play_in_loop = false;
   //start a new frame when lidar azimuth greater than frame_start_azimuth
   //range:[0-360), set frame_start_azimuth less than 0 if you do want to use it
-  float frame_start_azimuth = 1;
+  float frame_start_azimuth = 0;
   // enable the udp packet loss detection tool
   // it forbiddens parser udp packet while trun on this tool
   bool enable_packet_loss_tool = false;
@@ -99,12 +82,17 @@ typedef struct DecoderParam
   uint16_t use_timestamp_type = point_cloud_timestamp;
   int fov_start = -1;
   int fov_end = -1;
-  // support: 1_4: Pandar128E4X / OT, Pandar128E3X, Pandar64E3X, Pandar40E3X, Pandar90E3X;
-  //          3_1: PandarQT;  3_2: QT128C2X;
-  //          6_1: PandarXT32M1, PandarXT16M1, PandarXT32M2X / XTM;
-  //          special: Pandar64E2X, Pandar40E2X,
-  std::string distance_correction_lidar_type = "";
+  bool distance_correction_flag = false;
+  bool xt_spot_correction = false;
+  bool et_blooming_filter_flag = false;
+  RemakeConfig remake_config;
   uint32_t socket_buffer_size = 0;
+  std::string channel_fov_filter_path = "";  // correction/config/channel_fov_filter.txt
+  std::string multi_fov_filter_ranges = "";  // multiple fov filter ranges, for all channels
+  float frame_frequency = 0;
+  float default_frame_frequency = DEFAULT_MAX_MULTI_FRAME_NUM;
+  bool update_function_safety_flag = false;
+  uint16_t echo_mode_filter = 0;
 } DecoderParam;
 
 ///< The LiDAR input parameter
@@ -113,37 +101,53 @@ typedef struct InputParam
   // PTC mode
   PtcMode ptc_mode = PtcMode::tcp;
   SourceType source_type = DATA_FROM_PCAP;
-   ///< Ip of LiDAR
-  std::string device_ip_address = "Your lidar ip";   
+  // Ip of Lidar
+  std::string device_ip_address = "";   
+  // tcp port
+  uint16_t device_tcp_src_port = 5120;
   ///< Address of multicast
   std::string multicast_ip_address = "";  
   ///< Address of host
-  std::string host_ip_address = "Your host ip"; 
+  std::string host_ip_address = ""; 
   ///< port filter
   uint16_t device_udp_src_port = 0;
   uint16_t device_fault_port = 0;
-  ///< udp packet port number       
+  // udp packet destination port number       
   uint16_t udp_port = 2368;   
-  ///< ptc packet port number                
-  uint16_t ptc_port = 9347;            
-  bool read_pcap = true;          ///< true: The driver will process the pcap through pcap_path. false: The driver will
-                                   ///< Get data from online LiDAR
+  uint16_t fault_message_port = 0;
+  ///< ptc packet port number     
+  bool use_ptc_connected = true;         
+  uint16_t host_ptc_port = 0;  // 0 is not used
+  uint16_t ptc_port = 9347;
+  ///< serial port and baudrate
+  std::string rs485_com = "/dev/ttyUSB0";
+  std::string rs232_com = "/dev/ttyUSB1";
+  int point_cloud_baudrate = 3125000;
+  int rs485_baudrate = 115200;   
+  int rs232_baudrate = 9600;          
   std::string pcap_path = "Your pcap file path";  ///< Absolute path of pcap file
-  std::string correction_file_path = "Your correction file path";   ///< Path of angle calibration files(angle.csv).Only used for internal debugging.
-  std::string firetimes_path = "Your firetime file path";  ///< Path of firetime files(angle.csv).
+  std::string correction_file_path = "";   ///< Path of angle calibration files(angle.csv).Only used for internal debugging.
+  std::string firetimes_path = "";  ///< Path of firetime files(angle.csv).
+  std::string dcf_file_path = "Your dcf file path";
+  std::string correction_save_path = "";
   /// certFile          Represents the path of the user's certificate
-  const char* certFile = nullptr;
+  std::string certFile = "";
   /// privateKeyFile    Represents the path of the user's private key
-  const char* privateKeyFile = nullptr;
+  std::string privateKeyFile = "";
   /// caFile            Represents the path of the root certificate
-  const char* caFile = nullptr;
+  std::string caFile = "";
   /// standby_mode    set the standby_mode of lidar
   int standby_mode = -1;
   /// speed             set the rotational speed of lidar
   int speed = -1;
+  // timeout
+  float recv_point_cloud_timeout = -1; //(s), <0 : not timeout 
+  float ptc_connect_timeout = -1; //(s), <0 : not timeout 
+
 
   bool send_packet_ros;
   bool send_point_cloud_ros;
+  bool send_imu_ros;
   std::string frame_id;
 
   std::string ros_send_packet_topic = NULL_TOPIC;
@@ -151,7 +155,8 @@ typedef struct InputParam
   std::string ros_send_packet_loss_topic = NULL_TOPIC; 
   std::string ros_send_ptp_topic = NULL_TOPIC;
   std::string ros_send_correction_topic = NULL_TOPIC;
-  std::string ros_send_firetime_topic = NULL_TOPIC;
+  std::string ros_send_imu_topic = NULL_TOPIC;
+  std::string ros_send_every_packet_topic = NULL_TOPIC;
 
   std::string ros_recv_correction_topic = NULL_TOPIC;
   std::string ros_recv_packet_topic = NULL_TOPIC;
@@ -168,11 +173,9 @@ typedef struct DriverParam
   DecoderParam decoder_param;  
   ///< The frame id of LiDAR message    
   std::string frame_id = "hesai";  
-  ///< Lidar type
-  //XT spot correction support: 6_1: PandarXT32M1, PandarXT16M1
-  std::string lidar_type = "";  
-  int log_level = LOG_INFO | LOG_WARNING | LOG_ERROR | LOG_FATAL; //
-  int log_Target = LOG_TARGET_CONSOLE | LOG_TARGET_FILE;
+  bool use_gpu = false;
+  uint8_t log_level = HESAI_LOG_INFO | HESAI_LOG_WARNING | HESAI_LOG_ERROR | HESAI_LOG_FATAL; //
+  uint8_t log_Target = HESAI_LOG_TARGET_CONSOLE;
   std::string log_path = "./log.log";
 } DriverParam;
 }  // namespace lidar

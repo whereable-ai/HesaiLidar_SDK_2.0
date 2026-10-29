@@ -25,96 +25,133 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT
 TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
 ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ************************************************************************************************/
+#ifndef GENERAL_PARSER_GPU_CU_
+#define GENERAL_PARSER_GPU_CU_
 #include "general_parser_gpu.h"
-#include <string>
-#include <sstream>
+
 using namespace hesai::lidar;
 template <typename T_Point>
-GeneralParserGpu<T_Point>::GeneralParserGpu() {}
+GeneralParserGpu<T_Point>::GeneralParserGpu(uint16_t maxPacket, uint16_t maxPoint) {
+  cudaSafeMalloc((void**)&correction_azi_cu_, sizeof(float) * DEFAULT_MAX_LASER_NUM);
+  cudaSafeMalloc((void**)&correction_ele_cu_, sizeof(float) * DEFAULT_MAX_LASER_NUM);
+  cudaSafeMalloc((void**)&firetimes_cu_, sizeof(float) * DEFAULT_MAX_LASER_NUM);
+  points_ = nullptr;
+  points_cu_ = nullptr;
+  point_cloud_cu_ = nullptr;
+  correction_ptr = nullptr;
+  firetimes_ptr = nullptr;
+  if (correction_azi_cu_ == nullptr || correction_ele_cu_ == nullptr || firetimes_cu_ == nullptr) {
+    init_suc_flag_ = false;
+  } 
+}
 template <typename T_Point>
 GeneralParserGpu<T_Point>::~GeneralParserGpu() {
-  if (corrections_loaded_) {
-    corrections_loaded_ = false;
+  cudaSafeFree(correction_azi_cu_);
+  cudaSafeFree(correction_ele_cu_);
+  cudaSafeFree(firetimes_cu_);
+  if (points_ != nullptr) delete[] points_;
+  if (points_cu_ != nullptr) cudaSafeFree(points_cu_);  
+  if (point_cloud_cu_ != nullptr) cudaSafeFree(point_cloud_cu_);
+}
+
+template <typename T_Point>
+void GeneralParserGpu<T_Point>::LoadCorrectionStruct(void* _correction) {
+  if (init_suc_flag_ == false) return;
+  correction_ptr = (CorrectionData*)_correction;
+  int ret = 0;
+  ret |= CUDACheck(cudaMemcpy(correction_azi_cu_, correction_ptr->azimuth, sizeof(float) * DEFAULT_MAX_LASER_NUM, cudaMemcpyHostToDevice));
+  ret |= CUDACheck(cudaMemcpy(correction_ele_cu_, correction_ptr->elevation, sizeof(float) * DEFAULT_MAX_LASER_NUM, cudaMemcpyHostToDevice));
+  if (ret != 0) init_suc_flag_ = false;
+}
+
+template <typename T_Point>
+void GeneralParserGpu<T_Point>::LoadFiretimesStruct(void* _firetimes) {
+  if (init_suc_flag_ == false) return;
+  firetimes_ptr = (float*)_firetimes;
+  int ret = CUDACheck(cudaMemcpy(firetimes_cu_, firetimes_ptr, sizeof(float) * DEFAULT_MAX_LASER_NUM, cudaMemcpyHostToDevice));
+  if (ret != 0) init_suc_flag_ = false;
+}
+
+template <typename T_Point>
+void GeneralParserGpu<T_Point>::updateCorrectionFile() {
+  if (init_suc_flag_ == false) return;
+  if (*get_correction_file_ && correction_load_sequence_num_cuda_use_ != *correction_load_sequence_num_) {
+    correction_load_sequence_num_cuda_use_ = *correction_load_sequence_num_;
+    int ret = 0;
+    ret |= CUDACheck(cudaMemcpy(correction_azi_cu_, correction_ptr->azimuth, sizeof(float) * DEFAULT_MAX_LASER_NUM, cudaMemcpyHostToDevice));
+    ret |= CUDACheck(cudaMemcpy(correction_ele_cu_, correction_ptr->elevation, sizeof(float) * DEFAULT_MAX_LASER_NUM, cudaMemcpyHostToDevice));
+    if (ret != 0) init_suc_flag_ = false;
   }
 }
 
 template <typename T_Point>
-void GeneralParserGpu<T_Point>::LoadFiretimesFile(std::string firetimes_path) {
-  std::ifstream inFile(firetimes_path, std::ios::in);
-  if (inFile.is_open()) {
-    std::string lineStr;
-    //skip first line
-    std::getline(inFile, lineStr); 
-    while (getline(inFile, lineStr)) {
-      std::stringstream ss(lineStr);
-      std::string index, deltTime;
-      std::getline(ss, index, ',');
-      std::getline(ss, deltTime, ',');
-      this->firetime_correction_[std::stoi(index) - 1] = std::stod(deltTime);
+void GeneralParserGpu<T_Point>::updateFiretimeFile() {
+  if (init_suc_flag_ == false) return;
+  if (*get_firetime_file_ && firetime_load_sequence_num_cuda_use_ != *firetime_load_sequence_num_) {
+    firetime_load_sequence_num_cuda_use_ = *firetime_load_sequence_num_;
+    int ret = CUDACheck(cudaMemcpy(firetimes_cu_, firetimes_ptr, sizeof(float) * DEFAULT_MAX_LASER_NUM, cudaMemcpyHostToDevice));
+    if (ret != 0) init_suc_flag_ = false;
+  }
+}
+
+template <typename T_Point>
+void GeneralParserGpu<T_Point>::DoRemake(float azi_, float elev_, const RemakeConfig &remake_config, int &point_idx) {
+  if (remake_config.flag == false) return;
+  point_idx = -1;
+  elev_ = elev_ > 180.0 ? elev_ - 360.0 : elev_;
+  int new_azi_iscan = (azi_ - remake_config.min_azi) / remake_config.ring_azi_resolution;
+  int new_elev_iscan = (elev_ - remake_config.min_elev) / remake_config.ring_elev_resolution;
+  if (new_azi_iscan >= 0 && new_azi_iscan < remake_config.max_azi_scan && new_elev_iscan >= 0 && new_elev_iscan < remake_config.max_elev_scan) {
+    point_idx = new_azi_iscan * remake_config.max_elev_scan + new_elev_iscan;
+  }
+}
+
+template <typename T_Point>
+void GeneralParserGpu<T_Point>::reMalloc(uint32_t maxPackets, uint32_t maxPoints, uint32_t point_cloud_size) {
+  if (maxPackets != maxPackets_cu_ || maxPoints != maxPoints_cu_ || point_cloud_size != point_cloud_size_cu_) {
+    maxPackets_cu_ = maxPackets;
+    maxPoints_cu_ = maxPoints;
+    point_cloud_size_cu_ = point_cloud_size;
+    if (points_cu_ != nullptr) cudaSafeFree(points_cu_);
+    if (points_ != nullptr) delete[] points_;
+    if (point_cloud_cu_ != nullptr) cudaSafeFree(point_cloud_cu_);
+    
+    cudaSafeMalloc((void**)&points_cu_, maxPackets * maxPoints * sizeof(CudaPointXYZAER));
+    points_ = new CudaPointXYZAER[maxPackets * maxPoints];
+    cudaSafeMalloc((void**)&point_cloud_cu_, point_cloud_size * maxPackets * sizeof(uint8_t));
+    if (points_cu_ == nullptr || point_cloud_cu_ == nullptr || points_ == nullptr) {
+      init_suc_flag_ = false;
     }
-  } else {
-    LogError("Open correction file failed");
-  }
-  return;
-}
-
-template <typename T_Point>
-int GeneralParserGpu<T_Point>::LoadFiretimesString(char *correction_string) {
-  LogInfo("load firetimes string");
-  return 0;
-}
-
-template <typename T_Point>
-void GeneralParserGpu<T_Point>::SetTransformPara(float x, float y, float z, float roll, float pitch, float yaw) {
-  transform_.x = x;
-  transform_.y = y;
-  transform_.z = z;
-  transform_.roll = roll;
-  transform_.yaw = yaw;
-  transform_.pitch = pitch;
-}
-
-template <typename T_Point>
-void GeneralParserGpu<T_Point>::SetOpticalCenterCoordinates(std::string lidar_type) {
-  if (lidar_type == "Pandar128E4X" || lidar_type == "OT") {
-    optical_center.x = -10.0 / 1000.0;
-    optical_center.y = 45.0 / 1000.0;
-    optical_center.z = 0.0 / 1000.0;
-  } else if(lidar_type == "Pandar128E3X" || lidar_type == "Pandar64E3X" || lidar_type == "Pandar40E3X" || lidar_type == "Pandar90E3X") {
-    optical_center.x = -12.0 / 1000.0;
-    optical_center.y = 43.56 / 1000.0;
-    optical_center.z = 0.0 / 1000.0;
-  } else if(lidar_type == "Pandar64E2X" || lidar_type == "Pandar40E2X") {
-    optical_center.x = -12.0 / 1000.0;
-    optical_center.y = 38.73 / 1000.0;
-    optical_center.z = 0.0 / 1000.0;
-  } else if(lidar_type == "PandarQT") {
-    optical_center.x = -7.2 / 1000.0;
-    optical_center.y = 29.8 / 1000.0;
-    optical_center.z = 0.0 / 1000.0;
-  } else if(lidar_type == "QT128C2X") {
-    optical_center.x = 7.2 / 1000.0;
-    optical_center.y = 35.4 / 1000.0;
-    optical_center.z = 0.0 / 1000.0;
-  } else if(lidar_type == "PandarXT32M1" || lidar_type == "PandarXT16M1") {
-    optical_center.x = -13.0 / 1000.0;
-    optical_center.y = 31.5 / 1000.0;
-    optical_center.z = 0.0 / 1000.0;
-  } else if(lidar_type == "PandarXT32M2X" || lidar_type == "XTM") {
-    optical_center.x = -13.0 / 1000.0;
-    optical_center.y = 30.5 / 1000.0;
-    optical_center.z = 0.0 / 1000.0;
-  } else {
-    LogWarning("Parameter(distance_correction_lidar_type) is set to null or error to not enable distance correction");
   }
 }
 
 template <typename T_Point>
-int GeneralParserGpu<T_Point>::SetXtSpotCorrecion(std::string lidar_type) {
-  if (lidar_type == "PandarXT32M1" || lidar_type == "PandarXT16M1" ) {
-    xt_spot_correction = true;
-  } else {
-    return -1;
+int GeneralParserGpu<T_Point>::IsChannelFovFilter(float fov, int channel_index, FrameDecodeParam &param) { 
+  // high priority, filter some fov ranges for all channels. low cpu usage
+  if (param.config.multi_fov_filter_ranges.size() > 0) {
+    for (const auto & pair : param.config.multi_fov_filter_ranges) {
+      if (fov >= pair.first && fov <= pair.second) {
+        return 1;
+      }
+    }
+  }
+  // middle priority, filter some fov ranges for some channels, a little high cpu usage
+  if (param.config.channel_fov_filter.size() > 0 && param.config.channel_fov_filter.count(channel_index) > 0) {
+    for (const auto & pair : param.config.channel_fov_filter[channel_index]) {
+      if (fov >= pair.first && fov <= pair.second) {
+        // printf("channel %d, %d\n", channel_index, fov);
+        return 1;
+      }
+    }
+  }
+  // low priority, show only [fov_start, fov_end]. low cpu usage
+  if (param.config.fov_start != -1 && param.config.fov_end != -1) {
+    if (fov < param.config.fov_start || fov > param.config.fov_end) { //不在fov范围continue
+      return 1;
+    }
   }
   return 0;
 }
+
+
+#endif //GENERAL_PARSER_GPU_CU_

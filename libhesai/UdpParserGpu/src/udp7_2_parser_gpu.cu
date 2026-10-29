@@ -26,256 +26,94 @@ TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF TH
 ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ************************************************************************************************/
 
-#include <cuda_runtime.h>
-#include <cuda_runtime_api.h>
-#include <cuda_device_runtime_api.h>
 #include "udp7_2_parser_gpu.h"
-#include "safe_call.cuh"
-#include "return_code.h"
+namespace hesai
+{
+namespace lidar
+{
 
-using namespace hesai::lidar;
-template <typename T_Point>
-Udp7_2ParserGpu<T_Point>::Udp7_2ParserGpu() {
-  corrections_loaded_ = false;
-  cudaSafeMalloc(point_data_cu_, POINT_DATA_LEN);
-  cudaSafeMalloc(sensor_timestamp_cu_, SENSOR_TIMESTAMP_LEN);
-}
-template <typename T_Point>
-Udp7_2ParserGpu<T_Point>::~Udp7_2ParserGpu() {
-  cudaSafeFree(point_data_cu_);
-  cudaSafeFree(sensor_timestamp_cu_);
-  if (corrections_loaded_) {
-    cudaSafeFree(channel_elevations_cu_);
-    cudaSafeFree(channel_azimuths_cu_);
-    corrections_loaded_ = false;
+__global__ void compute_xyzs_7_2_impl(uint8_t* point_cloud_cu_, uint32_t point_cloud_size, const float* correction_azi, const float* correction_ele, 
+    TransformParam transform, CudaPointXYZAER* points_cu_) {
+  auto packet_index = blockIdx.x;
+  auto channel_index = threadIdx.x;
+  auto block_index = threadIdx.y;
+  auto channel_num = blockDim.x;
+  auto block_num = blockDim.y;
+
+  extern __shared__ uint8_t shared_data[];
+  int tid = block_index * channel_num + channel_index;
+  int thread_count = block_num * channel_num;
+  const uint8_t* input_data = point_cloud_cu_ + packet_index * point_cloud_size;
+  if (input_data[0] != 0xEE || input_data[1] != 0xFF) return;
+  for (int i = tid; i < point_cloud_size; i += thread_count) {
+    shared_data[i] = input_data[i];
   }
+  __syncthreads();
+  int point_index = packet_index * block_num * channel_num + block_index * channel_num + channel_index;
+  int header_offset = 6;
+  float dis_unit = shared_data[header_offset + 7] * 0.001f;
+  int unit_size = 5;
+  int uint_offset = header_offset + 19 + unit_size * channel_index;
+  float distance = (shared_data[uint_offset + 0] + shared_data[uint_offset + 1] * 0x100) * dis_unit;
+  uint8_t intensity = shared_data[uint_offset + 2];
+
+  int tail_offset = header_offset + 19 + unit_size * channel_num;
+  uint16_t column_id = shared_data[tail_offset + 7] + shared_data[tail_offset + 8] * 0x100;
+
+  float raw_azimuth = correction_azi[channel_index * FT::FT2_CORRECTION_LEN + column_id];
+  float raw_elevation = correction_ele[channel_index * FT::FT2_CORRECTION_LEN + column_id];
+  float theta = raw_azimuth / HALF_CIRCLE * M_PI;
+  float phi = raw_elevation / HALF_CIRCLE * M_PI;
+  
+  float z = distance * sin(phi);
+  auto r = distance * cosf(phi);
+  float x = r * sin(theta);
+  float y = r * cos(theta);
+
+  if (transform.use_flag) {
+    float cosa = cos(transform.roll);
+    float sina = sin(transform.roll);
+    float cosb = cos(transform.pitch);
+    float sinb = sin(transform.pitch);
+    float cosc = cos(transform.yaw);
+    float sinc = sin(transform.yaw);
+
+    float x_ = cosb * cosc * x + (sina * sinb * cosc - cosa * sinc) * y +
+                (sina * sinc + cosa * sinb * cosc) * z + transform.x;
+    float y_ = cosb * sinc * x + (cosa * cosc + sina * sinb * sinc) * y +
+                (cosa * sinb * sinc - sina * cosc) * z + transform.y;
+    float z_ = -sinb * x + sina * cosb * y + cosa * cosb * z + transform.z;
+
+    x = x_;
+    y = y_;
+    z = z_;
+  }
+
+  points_cu_[point_index].x = x;
+  points_cu_[point_index].y = y;
+  points_cu_[point_index].z = z;
+  points_cu_[point_index].azimuthCalib = theta * HALF_CIRCLE / M_PI;
+  while (points_cu_[point_index].azimuthCalib < 0) points_cu_[point_index].azimuthCalib += 360.0f;
+  while (points_cu_[point_index].azimuthCalib >= 360.0f) points_cu_[point_index].azimuthCalib -= 360.0f;
+  points_cu_[point_index].elevationCalib = phi * HALF_CIRCLE / M_PI;
+  while (points_cu_[point_index].elevationCalib < -180.0f) points_cu_[point_index].elevationCalib += 360.0f;
+  while (points_cu_[point_index].elevationCalib >= 180.0f) points_cu_[point_index].elevationCalib -= 360.0f;
+  points_cu_[point_index].reserved[0] = intensity;
+  points_cu_[point_index].reserved[1] = column_id & 0xFF;
+  points_cu_[point_index].reserved[2] = (column_id >> 8) & 0xFF;
 }
-template <typename T_Point>
-__global__ void compute_xyzs_7_2_impl(T_Point *xyzs, const float* channel_azimuths, const float* channel_elevations, 
-    const PointDecodeData* point_data, const uint64_t* sensor_timestamp, const double raw_distance_unit, Transform transform, 
-    const int blocknum, const int lasernum, const uint16_t packet_index) {
-  auto iscan = blockIdx.x;
-  auto ichannel = threadIdx.x;
-  if (iscan >= packet_index || ichannel >= blocknum * lasernum) return;
-  int point_index = iscan * blocknum * lasernum + (ichannel % (lasernum * blocknum));
-  float azimuth = point_data[point_index].azimuth / HALF_CIRCLE * M_PI;
-  float elevation = point_data[point_index].elevation / HALF_CIRCLE * M_PI;
 
-  auto rho = point_data[point_index].distances * raw_distance_unit;
-  float z = rho * sin(elevation);
-  auto r = rho * cosf(elevation);
-  float x = r * sin(azimuth);
-  float y = r * cos(azimuth);
-
-  float cosa = std::cos(transform.roll);
-  float sina = std::sin(transform.roll);
-  float cosb = std::cos(transform.pitch);
-  float sinb = std::sin(transform.pitch);
-  float cosc = std::cos(transform.yaw);
-  float sinc = std::sin(transform.yaw);
-
-  float x_ = cosb * cosc * x + (sina * sinb * cosc - cosa * sinc) * y +
-              (sina * sinc + cosa * sinb * cosc) * z + transform.x;
-  float y_ = cosb * sinc * x + (cosa * cosc + sina * sinb * sinc) * y +
-              (cosa * sinb * sinc - sina * cosc) * z + transform.y;
-  float z_ = -sinb * x + sina * cosb * y + cosa * cosb * z + transform.z;
-  gpu::setX(xyzs[point_index], x_);
-  gpu::setY(xyzs[point_index],  y_);
-  gpu::setZ(xyzs[point_index], z_);
-  gpu::setIntensity(xyzs[point_index], point_data[point_index].reflectivities);
-  gpu::setTimestamp(xyzs[point_index], double(sensor_timestamp[iscan]) / kMicrosecondToSecond);
-  gpu::setRing(xyzs[point_index], ichannel % lasernum);
-}
-
-template <typename T_Point>
-int Udp7_2ParserGpu<T_Point>::ComputeXYZI(LidarDecodedFrame<T_Point> &frame) {
-  if (!corrections_loaded_) return int(ReturnCode::CorrectionsUnloaded);      
-  cudaSafeCall(cudaMemcpy(point_data_cu_, frame.pointData,
-                          frame.block_num * frame.laser_num * frame.packet_num * sizeof(PointDecodeData), 
-                          cudaMemcpyHostToDevice), ReturnCode::CudaMemcpyHostToDeviceError);
-  cudaSafeCall(cudaMemcpy(sensor_timestamp_cu_, frame.sensor_timestamp,
-                          frame.packet_num * sizeof(uint64_t), 
-                          cudaMemcpyHostToDevice), ReturnCode::CudaMemcpyHostToDeviceError); 
-compute_xyzs_7_2_impl<<<frame.packet_num, frame.block_num * frame.laser_num>>>(this->frame_.gpu()->points, channel_azimuths_cu_, channel_elevations_cu_, 
-   point_data_cu_, sensor_timestamp_cu_, frame.distance_unit, this->transform_, frame.block_num, frame.laser_num, frame.packet_num);
+int compute_7_2_cuda(uint8_t* point_cloud_cu_, CudaPointXYZAER* points_cu_, uint32_t point_cloud_size, const float* correction_azi, 
+    const float* correction_ele, const FrameDecodeParam* fParam, uint32_t packet_num, uint16_t block_num, uint16_t channel_num) {
+  dim3 grid(packet_num);
+  dim3 block(channel_num, block_num);
+  compute_xyzs_7_2_impl<<<grid, block, point_cloud_size * sizeof(uint8_t)>>>(point_cloud_cu_, point_cloud_size, correction_azi, correction_ele, 
+    fParam->transform, points_cu_);
+  cudaDeviceSynchronize();
   cudaSafeCall(cudaGetLastError(), ReturnCode::CudaXYZComputingError);
-  this->frame_.DeviceToHost(0, frame.block_num * frame.laser_num * frame.packet_num * sizeof(T_Point));
-  std::memcpy(frame.points, this->frame_.cpu()->points, frame.block_num * frame.laser_num * frame.packet_num * sizeof(T_Point));
   return 0;
 }
-template<typename T_Point>
-int Udp7_2ParserGpu<T_Point>::LoadCorrectionString(char *data) {
-  if (LoadCorrectionDatData(data)) {
-    return 0;
-  }
-  return LoadCorrectionCsvData(data);
-}
-
-template<typename T_Point>
-int Udp7_2ParserGpu<T_Point>::LoadCorrectionCsvData(char *correction_string) {
-  std::istringstream ifs(correction_string);
-	std::string line;
-  // first line "Laser id,Elevation,Azimuth"
-	if(std::getline(ifs, line)) {  
-		LogInfo("Parse Lidar Correction...");
-	}
-	int lineCounter = 0;
-	std::vector<std::string>  firstLine;
-	split_string(firstLine, line, ',');
-  float elevations[CHANNEL_MAX][COLUMN_MAX];
-  float azimuths[CHANNEL_MAX][COLUMN_MAX];
-  while (std::getline(ifs, line)) {
-    if(line.length() < strlen("1,1,1,1")) {
-      return -1;
-    } 
-    else {
-      lineCounter++;
-    }
-    float elev, azimuth;
-    int lineId = 0;
-    int columnId = 0;
-    std::stringstream ss(line);
-    std::string subline;
-    std::getline(ss, subline, ',');
-    std::stringstream(subline) >> lineId;
-    std::getline(ss, subline, ',');
-    std::stringstream(subline) >> columnId;
-    std::getline(ss, subline, ',');
-    std::stringstream(subline) >> elev;
-    std::getline(ss, subline, ',');
-    std::stringstream(subline) >> azimuth;
-    if (lineId > CHANNEL_MAX || lineId <= 0 || columnId > COLUMN_MAX || columnId <= 0){
-      LogError("data error, lineId:%d, columnId:%d", lineId, columnId);
-      continue;
-    }
-    elevations[lineId - 1][columnId - 1] = elev * 100;
-    azimuths[lineId - 1][columnId - 1] = azimuth * 100;
-  }
-  CUDACheck(cudaMalloc(&channel_azimuths_cu_, sizeof(azimuths)));
-  CUDACheck(cudaMalloc(&channel_elevations_cu_, sizeof(elevations)));
-  CUDACheck(cudaMemcpy(channel_azimuths_cu_, azimuths, sizeof(azimuths), cudaMemcpyHostToDevice));
-  CUDACheck(cudaMemcpy(channel_elevations_cu_, elevations, sizeof(elevations), cudaMemcpyHostToDevice));
-  corrections_loaded_ = true;
-	return 0;
-}
-
-template<typename T_Point>
-int Udp7_2ParserGpu<T_Point>::LoadCorrectionDatData(char *correction_string) {
-  float elevations[CHANNEL_MAX][COLUMN_MAX];
-  float azimuths[CHANNEL_MAX][COLUMN_MAX];
-  try {
-    char *p = correction_string;
-    PandarFTCorrectionsHeader header = *(PandarFTCorrectionsHeader *)p;
-    if (0xee == header.pilot[0] && 0xff == header.pilot[1]) {
-      switch (header.version[1]) {
-        case 0: {
-          int column_num = header.column_number;
-          int channel_num = header.channel_number;
-          int resolution = header.resolution;
-          float fResolution = float(resolution);
-          int angleNum = column_num * channel_num;
-          int doubleAngleNum = angleNum * 2;
-          int16_t* angles = new int16_t[doubleAngleNum]{0};
-          int readLen = sizeof(int16_t) * doubleAngleNum;
-          memcpy((void*)angles, correction_string, readLen);
-          int hashLen = 32;
-          uint8_t* hashValue = new uint8_t[hashLen];
-          memcpy((void*)hashValue, correction_string + readLen, hashLen);
-          for (int row = 0; row < column_num; row++) {
-              for (int col = 0; col < channel_num; col++) {
-                  int idx = row * channel_num + col;
-                  azimuths[col][row] = angles[idx] * fResolution;
-              }
-          }
-
-          for (int row = 0; row < column_num; row++) {
-              for (int col = 0; col < channel_num; col++) {
-                  int idx = angleNum + row * channel_num + col;
-                  elevations[col][row] = angles[idx] * fResolution;
-              }
-          }
-          CUDACheck(cudaMalloc(&channel_azimuths_cu_, sizeof(azimuths)));
-          CUDACheck(cudaMalloc(&channel_elevations_cu_, sizeof(elevations)));
-          CUDACheck(cudaMemcpy(channel_azimuths_cu_, azimuths, sizeof(azimuths), cudaMemcpyHostToDevice));
-          CUDACheck(cudaMemcpy(channel_elevations_cu_, elevations, sizeof(elevations), cudaMemcpyHostToDevice));
-          corrections_loaded_ = true;
-          delete[] angles;
-          delete[] hashValue;
-          return 0;
-        } break;
-        case 1: {
-          int column_num = header.column_number;
-          int channel_num = header.channel_number;
-          int resolution = header.resolution;
-          float fResolution = float(resolution);
-          int angleNum = column_num * channel_num;
-          int doubleAngleNum = angleNum * 2;
-          int32_t* angles = new int32_t[doubleAngleNum]{0};
-          int readLen = sizeof(int32_t) * doubleAngleNum;
-          memcpy((void*)angles, correction_string + sizeof(PandarFTCorrectionsHeader), readLen);
-          int hashLen = 32;
-          uint8_t* hashValue = new uint8_t[hashLen];
-          memcpy((void*)hashValue, correction_string + readLen + sizeof(PandarFTCorrectionsHeader), hashLen);
-          for (int row = 0; row < column_num; row++) {
-              for (int col = 0; col < channel_num; col++) {
-                  int idx = row * channel_num + col;
-                  azimuths[col][row] = angles[idx] * fResolution;
-              }
-          }
-
-          for (int row = 0; row < column_num; row++) {
-              for (int col = 0; col < channel_num; col++) {
-                  int idx = angleNum + row * channel_num + col;
-                  elevations[col][row] = angles[idx] * fResolution;
-              }
-          }
-          CUDACheck(cudaMalloc(&channel_azimuths_cu_, sizeof(azimuths)));
-          CUDACheck(cudaMalloc(&channel_elevations_cu_, sizeof(elevations)));
-          CUDACheck(cudaMemcpy(channel_azimuths_cu_, azimuths, sizeof(azimuths), cudaMemcpyHostToDevice));
-          CUDACheck(cudaMemcpy(channel_elevations_cu_, elevations, sizeof(elevations), cudaMemcpyHostToDevice));
-          corrections_loaded_ = true;
-          delete[] angles;
-          delete[] hashValue;
-          return 0;
-        } break;
-        default:
-          break;
-      }
-    }
-
-    return -1;
-  } catch (const std::exception &e) {
-    LogFatal("load correction error: %s", e.what());
-    return -1;
-  }
-
-  return -1;
 
 }
-template <typename T_Point>
-int Udp7_2ParserGpu<T_Point>::LoadCorrectionFile(std::string lidar_correction_file) {
-  LogInfo("load correction file from local correction.csv now!");
-  std::ifstream fin(lidar_correction_file);
-  if (fin.is_open()) {
-    LogDebug("Open correction file success");
-    int length = 0;
-    fin.seekg(0, std::ios::end);
-    length = fin.tellg();
-    fin.seekg(0, std::ios::beg);
-    char *buffer = new char[length];
-    fin.read(buffer, length);
-    fin.close();
-    int ret = LoadCorrectionString(buffer);
-    delete[] buffer;
-    if (ret != 0) {
-      LogError("Parse local Correction file Error");
-    } else {
-      LogInfo("Parse local Correction file Success!!!");
-      return 0;
-    }
-  } else {
-    LogError("Open correction file failed");
-    return -1;
-  }
-  return -1;
 }
+

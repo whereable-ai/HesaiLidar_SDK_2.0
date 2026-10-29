@@ -1,20 +1,30 @@
-/*
- * Copyright (C) 2019 Hesai Tech<http://www.hesaitech.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- */
+/************************************************************************************************
+Copyright (C) 2023 Hesai Technology Co., Ltd.
+Copyright (C) 2023 Original Authors
+All rights reserved.
+
+All code in this repository is released under the terms of the following Modified BSD License. 
+Redistribution and use in source and binary forms, with or without modification, are permitted 
+provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this list of conditions and 
+  the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice, this list of conditions and 
+  the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its contributors may be used to endorse or 
+  promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED 
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A 
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR 
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT 
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR 
+TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+************************************************************************************************/
 
 /*
  * File:   tcp_ssl_client_boost.cc
@@ -45,7 +55,7 @@ typedef int socklen_t;
 using namespace hesai::lidar;
 using std::placeholders::_1;
 using std::placeholders::_2;
-int tcp_try_open(const char* ipaddr, int port, uint32_t timeout) {
+static int tcp_try_open(uint16_t host_port,const char* ipaddr, int port, uint32_t timeout) {
   #ifdef _MSC_VER
   WSADATA wsaData;
   WORD version = MAKEWORD(2, 2);
@@ -56,6 +66,7 @@ int tcp_try_open(const char* ipaddr, int port, uint32_t timeout) {
   }
 #endif  
   struct sockaddr_in serverAddr;
+  struct sockaddr_in localAddr;
   int sockfd;
   sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
@@ -66,9 +77,20 @@ int tcp_try_open(const char* ipaddr, int port, uint32_t timeout) {
     return -1;
   }
 
+  if (host_port > 0) {
+    memset(&localAddr, 0, sizeof(localAddr));
+    localAddr.sin_family = AF_INET;
+    localAddr.sin_addr.s_addr = htonl(INADDR_ANY); 
+    localAddr.sin_port = htons(host_port);
+  
+    if (bind(sockfd, (struct sockaddr*)&localAddr, sizeof(localAddr)) < 0) {
+      LogError("Failed to bind local port, system will auto assign one");
+    }
+  }
+
   memset(&serverAddr, 0, sizeof(serverAddr));
   serverAddr.sin_family = AF_INET;
-  serverAddr.sin_port = htons(port);
+  serverAddr.sin_port = htons(static_cast<u_short>(port));
   if (inet_pton(AF_INET, ipaddr, &serverAddr.sin_addr) <= 0) {
 #ifdef _MSC_VER
     closesocket(sockfd);
@@ -148,7 +170,7 @@ int tcp_try_open(const char* ipaddr, int port, uint32_t timeout) {
   return sockfd;
 }
 
-int tcp_open(const char* ipaddr, int port) {
+static int tcp_open(const char* ipaddr, int port) {
 #ifdef _MSC_VER
   WSADATA wsaData;
   WORD version = MAKEWORD(2, 2);
@@ -168,7 +190,7 @@ int tcp_open(const char* ipaddr, int port) {
   }
   memset(&servaddr, 0, sizeof(servaddr));
   servaddr.sin_family = AF_INET;
-  servaddr.sin_port = htons(port);
+  servaddr.sin_port = htons(static_cast<u_short>(port));
   if (inet_pton(AF_INET, ipaddr, &servaddr.sin_addr) <= 0) {
 #ifdef _MSC_VER
           closesocket(sockfd);
@@ -196,7 +218,7 @@ int tcp_open(const char* ipaddr, int port) {
   return sockfd;
 }
 
-int sys_readn_by_ssl(SSL *ssl, void *vptr, int n)
+static int sys_readn_by_ssl(SSL *ssl, void *vptr, int n)
 {
     int nleft;
     char *ptr;
@@ -228,11 +250,14 @@ int sys_readn_by_ssl(SSL *ssl, void *vptr, int n)
 TcpSslClient::TcpSslClient() {
   m_sServerIP.clear();
   ptc_port_ = 0;
-  tcpsock_ = -1;
+  tcpsock_ = (SOCKET)(-1);
   m_bLidarConnected = false;
   m_u32ReceiveBufferSize = 4096;
   ctx_ = nullptr;
   ssl_ = nullptr;
+  private_key_ = nullptr;
+  ca_ = nullptr;
+  cert_ = nullptr;
 }
 
 TcpSslClient::~TcpSslClient() {
@@ -244,14 +269,14 @@ void TcpSslClient::Close() {
   // m_sServerIP.clear();
   // ptc_port_ = 0;
   m_bLidarConnected = false;
-  if(tcpsock_ > 0) {
+  if((int)tcpsock_ != -1) {
 #ifdef _MSC_VER
     closesocket(tcpsock_);
     WSACleanup();
 #else
     close(tcpsock_);
 #endif
-    tcpsock_ = -1;
+    tcpsock_ = (SOCKET)(-1);
   }
   if (ctx_ != nullptr) {
     SSL_CTX_free(ctx_);
@@ -268,16 +293,18 @@ bool TcpSslClient::IsOpened() {
 }
 
 bool TcpSslClient::IsOpened(bool bExpectation) {
-  return m_bLidarConnected;
+  return m_bLidarConnected == bExpectation;
 }
 
-bool TcpSslClient::TryOpen(std::string IPAddr, 
+bool TcpSslClient::TryOpen(uint16_t host_port, 
+                        std::string IPAddr, 
                         uint16_t u16Port,
                         bool bAutoReceive, 
                         const char* cert, 
                         const char* private_key, 
                         const char* ca,
                         uint32_t timeout) {
+  (void)bAutoReceive;
   if (IsOpened(true) && m_sServerIP == IPAddr && u16Port == ptc_port_) {
     return true;
   }
@@ -291,8 +318,8 @@ bool TcpSslClient::TryOpen(std::string IPAddr,
   if(ctx_ == NULL) {
 		return false;
 	}
-  tcpsock_ = tcp_try_open(m_sServerIP.c_str(), ptc_port_, timeout);
-  if(tcpsock_ < 0) {
+  tcpsock_ = tcp_try_open(host_port, m_sServerIP.c_str(), ptc_port_, timeout);
+  if((int)tcpsock_ != -1) {
 		LogError("Connect to Server Failed!~!~");
     Close();
     return false;
@@ -304,7 +331,7 @@ bool TcpSslClient::TryOpen(std::string IPAddr,
     return false;
 	}
 
-  SSL_set_fd(ssl_, tcpsock_);
+  SSL_set_fd(ssl_, (int)tcpsock_);
 	if(SSL_connect(ssl_) == 0) {
 		LogError("connect ssl failed");
 		Close();
@@ -328,6 +355,7 @@ bool TcpSslClient::Open(std::string IPAddr,
                         const char* cert, 
                         const char* private_key, 
                         const char* ca) {
+  (void)bAutoReceive;
   if (IsOpened(true) && m_sServerIP == IPAddr && u16Port == ptc_port_) {
     return true;
   }
@@ -352,7 +380,7 @@ bool TcpSslClient::Open() {
 		return false;
 	}
   tcpsock_ = tcp_open(m_sServerIP.c_str(), ptc_port_);
-  if(tcpsock_ < 0) {
+  if((int)tcpsock_ != -1) {
 		LogError("Connect to Server Failed!~!~");
     Close();
     return false;
@@ -364,7 +392,7 @@ bool TcpSslClient::Open() {
     return false;
 	}
 
-  SSL_set_fd(ssl_, tcpsock_);
+  SSL_set_fd(ssl_, (int)tcpsock_);
 	if(SSL_connect(ssl_) == 0) {
 		LogError("connect ssl failed");
 		Close();
@@ -422,6 +450,7 @@ SSL_CTX* TcpSslClient::InitSslClient(const char* cert, const char* private_key, 
 }
 
 int TcpSslClient::Send(uint8_t *u8Buf, uint16_t u16Len, int flags) {
+  (void)flags;
   int len = -1;
   bool ret = true;
 
@@ -432,7 +461,6 @@ int TcpSslClient::Send(uint8_t *u8Buf, uint16_t u16Len, int flags) {
       errno != EINTR) {
       LogError("Send errno %d",  errno);
       ERR_print_errors_fp(stderr);
-      Close();
       return -1;
     }
   }
@@ -441,6 +469,7 @@ int TcpSslClient::Send(uint8_t *u8Buf, uint16_t u16Len, int flags) {
 }
 
 int TcpSslClient::Receive(uint8_t *u8Buf, uint32_t u32Len, int flags) {
+  if (flags == 0xFF) return -1;
   int len = -1;
   bool ret = true;
   
@@ -451,7 +480,6 @@ int TcpSslClient::Receive(uint8_t *u8Buf, uint32_t u32Len, int flags) {
     len = sys_readn_by_ssl(ssl_, u8Buf , (int32_t)u32Len);
     if(len != (int32_t)u32Len) {
       LogError("ssl receive failed");
-		  Close();
       return -1;
     }
   }
@@ -459,7 +487,7 @@ int TcpSslClient::Receive(uint8_t *u8Buf, uint32_t u32Len, int flags) {
   int delta = GetMicroTickCount() - tick;
 
   if (delta >= 1000000) {
-    LogWarning("Receive execu: %dus", delta);
+    LogDebug("Receive execu: %dus", delta);
   }
 
   return len;
@@ -467,7 +495,7 @@ int TcpSslClient::Receive(uint8_t *u8Buf, uint32_t u32Len, int flags) {
 
 
 bool TcpSslClient::SetReceiveTimeout(uint32_t u32Timeout) {
-  if (tcpsock_ < 0) {
+  if((int)tcpsock_ != -1) {
     LogWarning("TcpClient not open");
     return false;
   }
@@ -491,7 +519,7 @@ bool TcpSslClient::SetReceiveTimeout(uint32_t u32Timeout) {
 
 int TcpSslClient::SetTimeout(uint32_t u32RecMillisecond,
                           uint32_t u32SendMillisecond) {
-  if (tcpsock_ < 0) {
+  if((int)tcpsock_ != -1) {
     LogWarning("TcpClient not open");
     return -1;
   }
@@ -531,13 +559,13 @@ int TcpSslClient::SetTimeout(uint32_t u32RecMillisecond,
 }
 
 void TcpSslClient::SetReceiveBufferSize(const uint32_t &size) {
-  if (tcpsock_ < 0) {
+  if((int)tcpsock_ != -1) {
     LogWarning("TcpClient not open");
     return;
   }
 
   m_u32ReceiveBufferSize = size;
-  uint32_t recbuffSize;
+  uint32_t recbuffSize = 0;
   socklen_t optlen = sizeof(recbuffSize);
   int ret = getsockopt(tcpsock_, SOL_SOCKET, SO_RCVBUF, (char*)&recbuffSize, &optlen);
   if (ret == 0 && recbuffSize < size) {

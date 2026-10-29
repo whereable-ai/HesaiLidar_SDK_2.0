@@ -1,79 +1,144 @@
 # HesaiLidar_SDK_2.0
-## About the project
-This repository includes the software development kit for Hesai LiDAR sensor manufactured by Hesai Technology
 
-## Support Lidar type
-- Pandar
-- AT128/AT128P
-- QT
-- FT120
-- XT16/XT32
-- ET25
-- OT
+[👉 Chinese version](README_CN.md)
 
-## Environment and Dependencies
+## 1 Check Compatibility
 
-**System environment requirement:Linux**
-```
-Recommanded
--Ubuntu 16.04
--Ubuntu 18.04
--Ubuntu 20.04
--Ubuntu 22.04
-```
+### 1.1 Lidar Models
 
-**Compiler vresion requirement**
-```
-Cmake version requirement:Cmake 3.8.0 or above
-G++ version requirement:G++ 7.5 or above
-```
-**Library Dependencies: libpcl-dev + libpcap-dev + libyaml-cpp-dev + libboost-dev**
-```
-$ sudo apt install libpcl-dev libpcap-dev libyaml-cpp-dev libboost-dev
-```
+| Pandar       | OT           | QT           | XT           | AT           | FT           | JT           |
+|:------------|:------------|:------------|:------------|:------------|:------------|:------------|
+| Pandar40P    | OT128        | PandarQT     | PandarXT     | AT128E2X     | FT120        | JT128        |
+| Pandar40M    | OT128_40     | QT128C2X     | PandarXT-16  | AT128P       | FTX          | JT64P        |
+| Pandar64     | -            | -            | XT32M2X      | ATX          | -            | JT16         |
+| Pandar128E3X | -            | -            | -            | -            | -            | -            |
+| Pandar90E3X  | -            | -            | -            | -            | -            | -            |
 
-## Clone
-```
-$ git clone https://github.com/HesaiTechnology/HesaiLidar_SDK_2.0.git
-```
+### 1.2 Operating Systems
 
-## Build
-```
-1.$ cd HesaiLidar_SDK_2.0
-2.$ mkdir build
-3.$ cd build
-4.$ cmake ..
-5.$ make
-```
+- Ubuntu 16/18/20/22.04 
+- Windows 10
 
-## Run a sample
+### 1.3 Compiler Versions
 
-Set the parameters in param in main.cc or main.cu
-```
-// Reciving data from pcap file
-```
-	param.input_param.source_type = DATA_FROM_PCAP;
-	param.input_param.pcap_path = "path/to/pcap";
-	param.input_param.correction_file_path = "/path/to/correction.csv";
-	param.input_param.firetimes_path = "path/to/firetimes.csv";
-	param.decoder_param.distance_correction_lidar_type = "";   // Configure the corresponding radar model when optical centre correction needs to be turned on
-	param.lidar_type = ""; // When you need to enable XT point cloud S hierarchical correction, configure the corresponding model
-```
-// Reciving data from connected Lidar
-```
-	param.input_param.source_type = DATA_FROM_LIDAR;
-	param.input_param.device_ip_address = '192.168.1.201'; // 192.168.1.201 is the lidar ip address
-	param.input_param.ptc_port = 9347; // 9347 is the lidar ptc port
-	param.input_param.udp_port = 2368; // 2368 is the lidar udp port
-	param.input_param.host_ip_address = "192.168.1.100"; // 192.168.1.100 is the pc ip address
-	param.input_param.multicast_ip_address = "239.0.0.1"; // 239.0.0.1 is the lidar multcast ip address, set this parameter to "" when lidar do not support muticast
-	param.decoder_param.distance_correction_lidar_type = "";   //Configure the corresponding radar model when optical centre correction needs to be turned on
-	param.lidar_type = ""; // When you need to enable XT point cloud S hierarchical correction, configure the corresponding model
+Ubuntu
+- Cmake 3.8.0 and above
+- G++ 7.5 and above
+
+Windows
+- Cmake 3.8.0 and above
+- MSVC 2019 and above
+
+### 1.4 Dependencies
+
+- If using point cloud visualization features, `PCL` installation is required
+- If parsing PCAP files, `libpcap` installation is required
+- If using TLS/mTLS-based Ptcs communication (supported by some lidars), `openssl` installation is required
+
+<!-- - If parsing lidar point cloud correction files, `libyaml` installation is required  // Required for parsing config.yaml files in ROS driver -->
+
+## 2 Getting Started
+
+### 2.1 Clone
+
+```bash
+git clone --recurse-submodules https://github.com/HesaiTechnology/HesaiLidar_SDK_2.0.git
 ```
 
-$ make 
-// run a cpu sample
-$ ./sample
-// run a gpu sample
-$ ./sample_gpu
+> On Windows systems, downloading the repository as a ZIP file is not recommended as it may cause compilation errors due to symbolic link issues.
+
+### 2.2 Compilation
+
+#### 2.2.1 Compilation Instructions for Ubuntu
+```bash
+# 0. Install dependencies
+sudo apt update && sudo apt install -y libpcl-dev libpcap-dev libyaml-cpp-dev openssl
+
+# 1. Navigate to source directory
+cd HesaiLidar_SDK_2.0
+
+# 2. Create build directory and navigate to build directory
+mkdir -p build && cd build
+
+# 3. Configure project with Cmake
+#    - Add -DCMAKE_BUILD_TYPE=Release for optimized compilation
+cmake -DCMAKE_BUILD_TYPE=Release ..
+
+# 4. Compile SDK
+#    - Use -j$(nproc) to utilize all CPU cores
+make -j$(nproc)
 ```
+
+#### 2.2.2 Compilation Instructions for Windows
+Please refer to **[How to Compile SDK on Windows](docs/compile_on_windows.md)**.
+
+#### 2.2.3 Remove dependency on openssl library (not using PTCS communication)
+Please refer to the operations in **[Compile Macro Control](docs/compile_macro_control_description.md)** to configure the macro `WITH_PTCS_USE` to be inactive.
+
+## 3 Application Guide
+
+### 3.1 Parse Lidar Data Online
+Please refer to **[How to Parse Lidar Data Online](docs/parsing_lidar_data_online.md)**.
+
+### 3.2 Parse PCAP File Data Offline
+Please refer to **[How to Parse PCAP File Data Offline](docs/parsing_pcap_file_data_offline.md)**.
+
+### 3.3 Point Cloud Data Visualization
+Please refer to **[How to Visualize Point Cloud Data](docs/visualization_of_point_cloud_data.md)**.
+
+### 3.4 Coordinate Transformation
+Please refer to **[How to Perform Coordinate Transformation](docs/coordinate_transformation.md)**.
+
+### 3.5 Save Point Cloud Data as PCD Files
+Please refer to **[How to Save Point Cloud Data as PCD Files](docs/save_point_cloud_data_as_a_pcd_file.md)**.
+
+### 3.6 Use GPU Acceleration
+Please refer to **[How to Use GPU Acceleration for Performance Optimization](docs/use_gpu_acceleration.md)**.
+
+### 3.7 Invoke SDK API Command Interface (PTC Communication)
+Please refer to **[How to Invoke SDK API Command Interface](docs/invoke_sdk_api_command_interface.md)**.
+
+### 3.8 Common Troubleshooting (WARNING)
+Please refer to **[Common Troubleshooting (WARNING)](docs/common_error_codes.md)**.
+
+### 3.9 Packet Loss Statistics
+Please refer to **[How to Perform Packet Loss Statistics](docs/packet_loss_analysis.md)**.
+
+### 3.10 Use Multi-threading to Accelerate Parsing
+Please refer to the `thread_num` configuration in **[Functional Parameter Reference](docs/parameter_introduction.md)** and configure it to a value >1
+> Note: The maximum allowed thread count is [CPU maximum cores - 2]. If configured beyond this, it will be modified to this number. Multi-threading will consume more CPU resources, please configure appropriately.
+
+### 3.11 Parse Multiple Lidar Data Online
+Navigate to [multi_test.cc](./test/multi_test.cc)
+
+For parsing parameter configuration reference, see **[How to Parse Lidar Data Online](docs/parsing_lidar_data_online.md)**
+
+> The basic principle is to use multi-threading to start two SDKs to parse data
+
+### 3.12 Filter and Parse Specified Lidar Data from PCAP or Real-time Reception Containing Multi-lidar Data
+
+Please refer to the descriptions of `device_udp_src_port` and `device_fault_port` in **[Functional Parameter Reference](docs/parameter_introduction.md)**
+
+Enable point cloud packet filtering by configuring `device_udp_src_port` (point cloud packet source port number) and `device_ip_address` (point cloud packet source IP), parsing only point cloud packets from this source IP + source port number.
+
+Enable fault message filtering by configuring `device_fault_port` (fault message source port number) and `device_ip_address` (fault message source IP), parsing only fault messages from this source IP + source port number.
+
+### 3.13 Get Specific Timestamp for Each Point in Pandar Series, OT128, XT Series, QT Series Lidars (Point Cloud Packet Timestamp + Firing Channel Time Correction)
+
+Please use the LidarPointXYZICRTT structure to declare HesaiLidarSdk, where uint64_t timeSecond is the seconds time part and uint32_t timeNanosecond is the nanoseconds time part. For example: `HesaiLidarSdk<LidarPointXYZICRTT> sample;`
+
+### 3.14 Set SDK Point Cloud Reception Timeout and PTC Timeout During Initialization
+
+1. Set SDK point cloud reception timeout
+
+    Please refer to `recv_point_cloud_timeout` in **[Functional Parameter Reference](docs/parameter_introduction.md)**. This parameter defaults to `-1`, meaning that during initialization, if no valid point cloud is received, it will block and wait indefinitely. When this parameter is configured to >= 0, the SDK will wait for a period of time before initialization fails and exits.
+
+2. Set PTC timeout
+    
+    Please refer to `ptc_connect_timeout` in **[Functional Parameter Reference](docs/parameter_introduction.md)**. This parameter defaults to `-1`, meaning that during initialization, if in `DATA_FROM_LIDAR` mode, it will block and wait for PTC connection indefinitely. When this parameter is >= 0, the SDK will wait for a period of time before reporting a connection timeout error and continuing initialization.
+
+### 3.15 Point Cloud Rearrangement Based on Horizontal and Vertical Angles
+Please refer to **[Point Cloud Rearrangement Function](docs/point_cloud_rearrangement_function.md)**
+
+## 4 Functional Parameter Reference
+Please refer to **[Functional Parameter Reference](docs/parameter_introduction.md)**.
